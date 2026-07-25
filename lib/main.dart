@@ -234,6 +234,12 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   static const String _prefUseBridge = 'settings.useBridge';
   static const String _prefChartMinG = 'settings.chartMinG';
   static const String _prefChartMaxG = 'settings.chartMaxG';
+  static const String _prefWaveformTimeWindowMs =
+      'settings.waveformTimeWindowMs';
+  static const String _prefWaveformTimeWindowMinMs =
+      'settings.waveformTimeWindowMinMs';
+  static const String _prefWaveformTimeWindowMaxMs =
+      'settings.waveformTimeWindowMaxMs';
   static const String _prefAiChannelMode = 'settings.aiChannelMode';
   static const String _prefAccelPresetId = 'settings.accelPresetId';
   static const String _prefAccelSensitivityMvPerG =
@@ -278,7 +284,9 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   int _bridgeWaveSampleRateHz = 0;
   int _bridgeWaveDecimStep = 1;
   String _waveChannel = 'AI0';
-  double _waveformTimeWindowMs = 100.0; // User-configurable time axis scale
+  double _waveformTimeWindowMs = 200.0; // User-configurable time axis scale
+  double _waveformTimeWindowMinMs = 20.0;
+  double _waveformTimeWindowMaxMs = 2000.0;
   StreamSubscription<DaqWaveFrame>? _waveSub;
   final Set<String> _hiddenChannels = <String>{};
   final Set<String> _hiddenCombinedChannels = <String>{};
@@ -311,6 +319,8 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   late final TextEditingController _chartMaxController;
   late final TextEditingController _accelSensitivityController;
   late final TextEditingController _waveformTimeWindowController;
+  late final TextEditingController _waveformTimeWindowMinController;
+  late final TextEditingController _waveformTimeWindowMaxController;
 
   static const Duration _historyRetention = Duration(hours: 4);
   static const int _combinedRealtimeSeconds = 60;
@@ -382,6 +392,12 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     );
     _waveformTimeWindowController = TextEditingController(
       text: _waveformTimeWindowMs.toString(),
+    );
+    _waveformTimeWindowMinController = TextEditingController(
+      text: _waveformTimeWindowMinMs.toString(),
+    );
+    _waveformTimeWindowMaxController = TextEditingController(
+      text: _waveformTimeWindowMaxMs.toString(),
     );
     _acquisitionService = DataAcquisitionService(channels: _channels);
     _syncAcquisitionSignalUnit();
@@ -469,6 +485,8 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     _chartMaxController.dispose();
     _accelSensitivityController.dispose();
     _waveformTimeWindowController.dispose();
+    _waveformTimeWindowMinController.dispose();
+    _waveformTimeWindowMaxController.dispose();
     unawaited(_acquisitionService.dispose());
     super.dispose();
   }
@@ -561,6 +579,37 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         _dangerThreshold = _chartMinG + range * 0.8;
       }
     }
+
+    final double? minWaveMs = double.tryParse(
+      _waveformTimeWindowMinController.text.trim(),
+    );
+    final double? maxWaveMs = double.tryParse(
+      _waveformTimeWindowMaxController.text.trim(),
+    );
+    if (minWaveMs != null &&
+        maxWaveMs != null &&
+        minWaveMs > 0 &&
+        maxWaveMs > minWaveMs) {
+      _waveformTimeWindowMinMs = minWaveMs;
+      _waveformTimeWindowMaxMs = maxWaveMs;
+    }
+
+    final double? parsedWaveWindowMs = double.tryParse(
+      _waveformTimeWindowController.text.trim(),
+    );
+    if (parsedWaveWindowMs != null && parsedWaveWindowMs > 0) {
+      _waveformTimeWindowMs = _clampWaveformTimeWindowMs(parsedWaveWindowMs);
+      _waveformTimeWindowController.text = _waveformTimeWindowMs.toString();
+    }
+  }
+
+  double _clampWaveformTimeWindowMs(double value) {
+    if (_waveformTimeWindowMaxMs <= _waveformTimeWindowMinMs) {
+      return max(1.0, value);
+    }
+    return value
+        .clamp(_waveformTimeWindowMinMs, _waveformTimeWindowMaxMs)
+        .toDouble();
   }
 
   String _upsertBridgeFlag(String source, String flag, String value) {
@@ -820,6 +869,9 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     final bool? savedUseBridge = prefs.getBool(_prefUseBridge);
     final double? savedChartMin = prefs.getDouble(_prefChartMinG);
     final double? savedChartMax = prefs.getDouble(_prefChartMaxG);
+    final double? savedWaveWindow = prefs.getDouble(_prefWaveformTimeWindowMs);
+    final double? savedWaveMin = prefs.getDouble(_prefWaveformTimeWindowMinMs);
+    final double? savedWaveMax = prefs.getDouble(_prefWaveformTimeWindowMaxMs);
     final String? savedAiMode = prefs.getString(_prefAiChannelMode);
     final String? savedAccelPresetId = prefs.getString(_prefAccelPresetId);
     final int? savedSampleRateHz = prefs.getInt(_prefSampleRateHz);
@@ -859,6 +911,23 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       }
       if (savedChartMax != null) {
         _chartMaxG = savedChartMax;
+      }
+      if (savedWaveMin != null && savedWaveMin > 0) {
+        _waveformTimeWindowMinMs = savedWaveMin;
+      }
+      if (savedWaveMax != null && savedWaveMax > 0) {
+        _waveformTimeWindowMaxMs = savedWaveMax;
+      }
+      if (_waveformTimeWindowMaxMs <= _waveformTimeWindowMinMs) {
+        _waveformTimeWindowMinMs = 20.0;
+        _waveformTimeWindowMaxMs = 2000.0;
+      }
+      if (savedWaveWindow != null && savedWaveWindow > 0) {
+        _waveformTimeWindowMs = _clampWaveformTimeWindowMs(savedWaveWindow);
+      } else {
+        _waveformTimeWindowMs = _clampWaveformTimeWindowMs(
+          _waveformTimeWindowMs,
+        );
       }
       if (_chartMaxG <= _chartMinG) {
         _chartMinG = 0.0;
@@ -942,6 +1011,11 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       _samplesPerReadController.text = _samplesPerRead.toString();
       _chartMinController.text = _chartMinG.toString();
       _chartMaxController.text = _chartMaxG.toString();
+      _waveformTimeWindowController.text = _waveformTimeWindowMs.toString();
+      _waveformTimeWindowMinController.text = _waveformTimeWindowMinMs
+          .toString();
+      _waveformTimeWindowMaxController.text = _waveformTimeWindowMaxMs
+          .toString();
       _accelSensitivityController.text = _customAccelSensitivityMvPerG
           .toString();
     });
@@ -958,6 +1032,15 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     await prefs.setBool(_prefUseBridge, _useBridge);
     await prefs.setDouble(_prefChartMinG, _chartMinG);
     await prefs.setDouble(_prefChartMaxG, _chartMaxG);
+    await prefs.setDouble(_prefWaveformTimeWindowMs, _waveformTimeWindowMs);
+    await prefs.setDouble(
+      _prefWaveformTimeWindowMinMs,
+      _waveformTimeWindowMinMs,
+    );
+    await prefs.setDouble(
+      _prefWaveformTimeWindowMaxMs,
+      _waveformTimeWindowMaxMs,
+    );
     await prefs.setInt(_prefSampleRateHz, _sampleRateHz);
     await prefs.setInt(_prefSamplesPerRead, _samplesPerRead);
     await prefs.setString(_prefAiChannelMode, _aiModeFlagValue(_aiChannelMode));
@@ -1092,6 +1175,40 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       _eventLogs.insert(
         0,
         '[${DateTime.now().toLocal()}] Chart scale updated to ${_chartMinG.toStringAsFixed(2)} .. ${_chartMaxG.toStringAsFixed(2)} g',
+      );
+      _trimLogs();
+    });
+
+    unawaited(_saveSettings());
+  }
+
+  void _applyWaveformScaleRange() {
+    final double? minMs = double.tryParse(
+      _waveformTimeWindowMinController.text.trim(),
+    );
+    final double? maxMs = double.tryParse(
+      _waveformTimeWindowMaxController.text.trim(),
+    );
+
+    if (minMs == null || maxMs == null || minMs <= 0 || minMs >= maxMs) {
+      setState(() {
+        _eventLogs.insert(
+          0,
+          '[${DateTime.now().toLocal()}] Invalid waveform time scale range. Use 0 < min < max (ms).',
+        );
+        _trimLogs();
+      });
+      return;
+    }
+
+    setState(() {
+      _waveformTimeWindowMinMs = minMs;
+      _waveformTimeWindowMaxMs = maxMs;
+      _waveformTimeWindowMs = _clampWaveformTimeWindowMs(_waveformTimeWindowMs);
+      _waveformTimeWindowController.text = _waveformTimeWindowMs.toString();
+      _eventLogs.insert(
+        0,
+        '[${DateTime.now().toLocal()}] Waveform time scale range updated to ${_waveformTimeWindowMinMs.toStringAsFixed(1)} .. ${_waveformTimeWindowMaxMs.toStringAsFixed(1)} ms',
       );
       _trimLogs();
     });
@@ -1719,6 +1836,22 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       2 => 'Log data',
       _ => 'Cài đặt',
     };
+    final ButtonStyle topActionButtonStyle = FilledButton.styleFrom(
+      visualDensity: const VisualDensity(horizontal: -2, vertical: -1),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      textStyle: const TextStyle(
+        fontSize: 10.5,
+        fontWeight: FontWeight.w700,
+        height: 1.2,
+      ),
+    );
+    final ButtonStyle sourceButtonStyle = _useBridge
+        ? topActionButtonStyle
+        : topActionButtonStyle.copyWith(
+            backgroundColor: const WidgetStatePropertyAll(Color(0xFFC0392B)),
+            foregroundColor: const WidgetStatePropertyAll(Colors.white),
+          );
 
     return Scaffold(
       appBar: AppBar(
@@ -1729,20 +1862,29 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
             child: Row(
               children: <Widget>[
                 FilledButton.tonalIcon(
+                  style: topActionButtonStyle,
                   onPressed: _toggleRun,
                   icon: Icon(_isRunning ? Icons.pause : Icons.play_arrow),
-                  label: Text(_isRunning ? 'Đang chạy' : 'Tạm dừng'),
+                  label: Text(
+                    _isRunning ? 'Đang chạy' : 'Tạm dừng',
+                    softWrap: false,
+                  ),
                 ),
                 const SizedBox(width: 8),
                 FilledButton.tonalIcon(
+                  style: sourceButtonStyle,
                   onPressed: () {
                     unawaited(_toggleDataSource(!_useBridge));
                   },
                   icon: const Icon(Icons.swap_horiz),
-                  label: Text(_useBridge ? 'Nguồn bridge' : 'Nguồn demo'),
+                  label: Text(
+                    _useBridge ? 'Nguồn bridge' : 'Nguồn demo',
+                    softWrap: false,
+                  ),
                 ),
                 const SizedBox(width: 8),
                 FilledButton.tonalIcon(
+                  style: topActionButtonStyle,
                   onPressed: _toggleConnection,
                   icon: Icon(_isConnected ? Icons.link : Icons.link_off),
                   label: Text(
@@ -1751,6 +1893,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                               ? 'Bridge đã kết nối'
                               : 'Bridge đã ngắt')
                         : (_isConnected ? 'Demo đã kết nối' : 'Demo đã ngắt'),
+                    softWrap: false,
                   ),
                 ),
               ],
@@ -2329,10 +2472,13 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     final double blockMs = hasData
         ? (outCount > 1 ? (outCount - 1) * timeStepMs : timeStepMs)
         : 100.0;
+    final double clampedWindowMs = _clampWaveformTimeWindowMs(
+      _waveformTimeWindowMs,
+    );
     final bool autoExpandWindowForMock = !hasFrameData;
-    final double displayTimeWindowMs = autoExpandWindowForMock
-        ? max(blockMs, _waveformTimeWindowMs)
-        : (_waveformTimeWindowMs > 0 ? _waveformTimeWindowMs : blockMs);
+    final double displayTimeWindowMs = _clampWaveformTimeWindowMs(
+      autoExpandWindowForMock ? max(blockMs, clampedWindowMs) : clampedWindowMs,
+    );
     final bool waveInVoltage = _useBridge && hasFrameData;
     final double minY = waveInVoltage ? _voltageMin : _chartMinG;
     final double maxY = waveInVoltage ? _voltageMax : _chartMaxG;
@@ -2408,7 +2554,11 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                   onChanged: (String value) {
                     final double? parsed = double.tryParse(value);
                     if (parsed != null && parsed > 0) {
-                      setState(() => _waveformTimeWindowMs = parsed);
+                      setState(() {
+                        _waveformTimeWindowMs = _clampWaveformTimeWindowMs(
+                          parsed,
+                        );
+                      });
                     }
                   },
                 ),
@@ -2419,8 +2569,14 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                 child: ElevatedButton.icon(
                   onPressed: () {
                     setState(() {
-                      _waveformTimeWindowMs = blockMs;
+                      _waveformTimeWindowMs = _clampWaveformTimeWindowMs(
+                        blockMs,
+                      );
                       _waveformTimeWindowController.text = blockMs
+                          .clamp(
+                            _waveformTimeWindowMinMs,
+                            _waveformTimeWindowMaxMs,
+                          )
                           .toStringAsFixed(1);
                     });
                   },
@@ -2435,6 +2591,11 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                 ),
               ),
             ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Giới hạn thang: ${_waveformTimeWindowMinMs.toStringAsFixed(1)} .. ${_waveformTimeWindowMaxMs.toStringAsFixed(1)} ms',
+            style: const TextStyle(fontSize: 11, color: Color(0xFF5E6A79)),
           ),
         ],
         const SizedBox(height: 8),
@@ -3330,6 +3491,42 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
             Text(
               'Thang đo hiện tại: ${_chartMinG.toStringAsFixed(2)} g .. ${_chartMaxG.toStringAsFixed(2)} g',
             ),
+            const SizedBox(height: 10),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: TextField(
+                    controller: _waveformTimeWindowMinController,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                      signed: false,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Scale ms nhỏ nhất (kênh sóng)',
+                      hintText: '20',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: _waveformTimeWindowMaxController,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                      signed: false,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Scale ms lớn nhất (kênh sóng)',
+                      hintText: '2000',
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Giới hạn sóng hiện tại: ${_waveformTimeWindowMinMs.toStringAsFixed(1)} .. ${_waveformTimeWindowMaxMs.toStringAsFixed(1)} ms | Cửa sổ đang dùng: ${_waveformTimeWindowMs.toStringAsFixed(1)} ms',
+            ),
             const SizedBox(height: 14),
             const Divider(height: 1),
             const SizedBox(height: 14),
@@ -3380,6 +3577,11 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                   onPressed: _applyChartScale,
                   icon: const Icon(Icons.stacked_line_chart),
                   label: const Text('Áp dụng thang đo'),
+                ),
+                FilledButton.icon(
+                  onPressed: _applyWaveformScaleRange,
+                  icon: const Icon(Icons.show_chart),
+                  label: const Text('Áp dụng scale sóng'),
                 ),
               ],
             ),
@@ -3500,13 +3702,21 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       _chartMaxG = 1.2;
       _warningThreshold = 0.65;
       _dangerThreshold = 0.85;
+      _waveformTimeWindowMinMs = 20.0;
+      _waveformTimeWindowMaxMs = 2000.0;
+      _waveformTimeWindowMs = _clampWaveformTimeWindowMs(200.0);
 
       _chartMinController.text = _chartMinG.toString();
       _chartMaxController.text = _chartMaxG.toString();
+      _waveformTimeWindowMinController.text = _waveformTimeWindowMinMs
+          .toString();
+      _waveformTimeWindowMaxController.text = _waveformTimeWindowMaxMs
+          .toString();
+      _waveformTimeWindowController.text = _waveformTimeWindowMs.toString();
 
       _eventLogs.insert(
         0,
-        '[${DateTime.now().toLocal()}] Đặt lại thang đo đồ thị và ngưỡng cảnh báo về mặc định.',
+        '[${DateTime.now().toLocal()}] Đặt lại thang đo đồ thị, scale sóng và ngưỡng cảnh báo về mặc định.',
       );
       _trimLogs();
     });
