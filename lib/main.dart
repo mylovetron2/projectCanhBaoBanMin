@@ -297,6 +297,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   double _voltageMax = 10.0;
   double _chartMinG = 0.0;
   double _chartMaxG = 1.2;
+  double _fftMaxY = 0.01;
   int _sampleRateHz = 10000;
   int _samplesPerRead = 1000;
   int? _actualSampleRateHz;
@@ -2159,6 +2160,60 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     return p;
   }
 
+  static const double _fftDisplayMinHz = 10.0;
+  static const double _fftDisplayMaxHz = 5000.0;
+  static const double _fftDisplayMinX = 1.0;
+  static const double _fftDisplayMaxX = 3.7;
+
+  double _fftAxisXForFrequency(double frequencyHz) {
+    final double clampedFrequency = frequencyHz.clamp(
+      _fftDisplayMinHz,
+      _fftDisplayMaxHz,
+    );
+    final double minLog = log(_fftDisplayMinHz);
+    final double maxLog = log(_fftDisplayMaxHz);
+    final double normalized =
+        (log(clampedFrequency) - minLog) / (maxLog - minLog);
+    return _fftDisplayMinX + normalized * (_fftDisplayMaxX - _fftDisplayMinX);
+  }
+
+  double _fftFrequencyForAxisX(double axisX) {
+    final double normalized =
+        ((axisX - _fftDisplayMinX) / (_fftDisplayMaxX - _fftDisplayMinX)).clamp(
+          0.0,
+          1.0,
+        );
+    final double minLog = log(_fftDisplayMinHz);
+    final double maxLog = log(_fftDisplayMaxHz);
+    return exp(minLog + normalized * (maxLog - minLog));
+  }
+
+  bool _isCloseTo(double value, double target, [double epsilon = 0.05]) {
+    return (value - target).abs() <= epsilon;
+  }
+
+  String _fftAxisLabelForValue(double value) {
+    if (_isCloseTo(value, _fftAxisXForFrequency(10))) return '10';
+    if (_isCloseTo(value, _fftAxisXForFrequency(100))) return '100';
+    if (_isCloseTo(value, _fftAxisXForFrequency(1000))) return '1000';
+    if (_isCloseTo(value, _fftAxisXForFrequency(5000))) return '5000';
+    return '';
+  }
+
+  List<FlSpot> _buildFftPlotSpots(List<double> freqs, List<double> mags) {
+    final List<FlSpot> spots = <FlSpot>[];
+    final int count = min(freqs.length, mags.length);
+    for (int i = 0; i < count; i++) {
+      final double frequencyHz = freqs[i];
+      if (frequencyHz < _fftDisplayMinHz) {
+        continue;
+      }
+      final double axisX = _fftAxisXForFrequency(frequencyHz);
+      spots.add(FlSpot(axisX, mags[i]));
+    }
+    return spots;
+  }
+
   Widget _buildFftPanel({bool compact = false}) {
     // ── Prefer real FFT from bridge; fall back to Dart-computed FFT (mock) ──
     final bool hasFrameFft =
@@ -2201,7 +2256,14 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
 
     final double peakMag = mags.isEmpty ? 0.0 : mags.reduce(max);
     final double minMag = mags.isEmpty ? 0.0 : mags.reduce(min);
-    final double safeMaxY = peakMag > 0 ? peakMag * 1.2 : 0.01;
+    if (peakMag * 1.2 > _fftMaxY) {
+      // Update sticky max only upward — avoids Y-axis jumping
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() => _fftMaxY = peakMag * 1.2);
+      });
+    }
+    final double safeMaxY = _fftMaxY;
+    final List<FlSpot> fftSpots = _buildFftPlotSpots(freqs, mags);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -2320,18 +2382,21 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                   duration: Duration.zero,
                   curve: Curves.linear,
                   LineChartData(
-                    minX: freqs.first,
-                    maxX: freqs.last,
+                    minX: _fftDisplayMinX,
+                    maxX: _fftDisplayMaxX,
                     minY: 0,
                     maxY: safeMaxY,
-                    clipData: FlClipData.all(),
+                    clipData: const FlClipData.none(),
                     lineTouchData: LineTouchData(
                       enabled: true,
                       touchTooltipData: LineTouchTooltipData(
                         getTooltipItems: (List<LineBarSpot> spots) {
                           return spots.map((LineBarSpot s) {
+                            final double frequencyHz = _fftFrequencyForAxisX(
+                              s.x,
+                            );
                             return LineTooltipItem(
-                              '${s.x.toStringAsFixed(3)} Hz\n${s.y.toStringAsFixed(4)}',
+                              '${frequencyHz.toStringAsFixed(1)} Hz\n${s.y.toStringAsFixed(4)}',
                               const TextStyle(
                                 fontSize: 11,
                                 fontWeight: FontWeight.w600,
@@ -2343,14 +2408,14 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                     ),
                     gridData: FlGridData(
                       show: true,
-                      drawVerticalLine: true,
+                      drawVerticalLine: false,
+                      horizontalInterval: safeMaxY > 0.001
+                          ? safeMaxY / 4
+                          : 0.01,
                       getDrawingHorizontalLine: (_) => const FlLine(
-                        color: Color(0xFFE8EDF3),
-                        strokeWidth: 1,
-                      ),
-                      getDrawingVerticalLine: (_) => const FlLine(
-                        color: Color(0xFFE8EDF3),
-                        strokeWidth: 1,
+                        color: Color(0xFFCDD8CC),
+                        strokeWidth: 0.7,
+                        dashArray: <int>[3, 3],
                       ),
                     ),
                     titlesData: FlTitlesData(
@@ -2365,7 +2430,10 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                           getTitlesWidget: (double value, TitleMeta meta) {
                             return Text(
                               value.toStringAsFixed(3),
-                              style: const TextStyle(fontSize: 9),
+                              style: const TextStyle(
+                                fontSize: 9,
+                                color: Color(0xFF4A5A6A),
+                              ),
                             );
                           },
                         ),
@@ -2384,22 +2452,89 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                         sideTitles: SideTitles(
                           showTitles: true,
                           reservedSize: 22,
+                          interval: 0.1,
                           getTitlesWidget: (double value, TitleMeta meta) {
-                            return Text(
-                              value.toStringAsFixed(2),
-                              style: const TextStyle(fontSize: 9),
+                            final String label = _fftAxisLabelForValue(value);
+                            if (label.isEmpty) {
+                              return const SizedBox.shrink();
+                            }
+                            return SideTitleWidget(
+                              axisSide: meta.axisSide,
+                              child: Text(
+                                label,
+                                style: const TextStyle(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFF3A4A5A),
+                                ),
+                              ),
                             );
                           },
                         ),
                       ),
                     ),
-                    borderData: FlBorderData(show: false),
+                    extraLinesData: ExtraLinesData(
+                      verticalLines: <VerticalLine>[
+                        // Minor log-scale grid lines
+                        ...<double>[
+                          20,
+                          30,
+                          40,
+                          50,
+                          60,
+                          70,
+                          80,
+                          90,
+                          200,
+                          300,
+                          400,
+                          500,
+                          600,
+                          700,
+                          800,
+                          900,
+                          2000,
+                          3000,
+                          4000,
+                        ].map(
+                          (double f) => VerticalLine(
+                            x: _fftAxisXForFrequency(f),
+                            color: const Color(0xFFCDD8C8),
+                            strokeWidth: 0.4,
+                            dashArray: <int>[2, 4],
+                          ),
+                        ),
+                        // Major decade lines (10, 100, 1000, 5000 Hz)
+                        ...<double>[10, 100, 1000, 5000].map(
+                          (double f) => VerticalLine(
+                            x: _fftAxisXForFrequency(f),
+                            color: const Color(0xFF8EA8B8),
+                            strokeWidth: 1.0,
+                          ),
+                        ),
+                      ],
+                    ),
+                    rangeAnnotations: RangeAnnotations(
+                      verticalRangeAnnotations: <VerticalRangeAnnotation>[
+                        VerticalRangeAnnotation(
+                          x1: _fftAxisXForFrequency(200),
+                          x2: _fftAxisXForFrequency(700),
+                          color: const Color(0xFFF5F9EE),
+                        ),
+                      ],
+                    ),
+                    borderData: FlBorderData(
+                      show: true,
+                      border: const Border(
+                        left: BorderSide(color: Color(0xFF8EA8B8), width: 1),
+                        bottom: BorderSide(color: Color(0xFF8EA8B8), width: 1),
+                        right: BorderSide(color: Color(0xFFCDD5D8), width: 0.5),
+                        top: BorderSide(color: Color(0xFFCDD5D8), width: 0.5),
+                      ),
+                    ),
                     lineBarsData: <LineChartBarData>[
                       LineChartBarData(
-                        spots: List<FlSpot>.generate(
-                          freqs.length,
-                          (int i) => FlSpot(freqs[i], mags[i]),
-                        ),
+                        spots: fftSpots,
                         isCurved: false,
                         color: _channelColor(_fftChannel),
                         barWidth: 1.5,
