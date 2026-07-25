@@ -935,7 +935,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
           content: Text(
             _useBridge
                 ? 'Stop the NI-DAQmx bridge process and disconnect now?'
-                : 'Disconnect mock link now?',
+                : 'Disconnect demo link now?',
           ),
           actions: <Widget>[
             TextButton(
@@ -967,11 +967,11 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         _acquisitionService.setMockConnected(true);
         _eventLogs.insert(
           0,
-          '[${DateTime.now().toLocal()}] Mock link connected ($trigger)',
+          '[${DateTime.now().toLocal()}] Demo link connected ($trigger)',
         );
         _trimLogs();
       });
-      _showActionMessage('Mock connected.');
+      _showActionMessage('Demo connected.');
       return;
     }
 
@@ -990,7 +990,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         setState(() {
           _eventLogs.insert(
             0,
-            '[${DateTime.now().toLocal()}] Bridge executable path is empty. Stay in mock mode or set a valid path.',
+            '[${DateTime.now().toLocal()}] Bridge executable path is empty. Stay in demo mode or set a valid path.',
           );
           _isConnected = false;
           _trimLogs();
@@ -1058,11 +1058,11 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         _acquisitionService.setMockConnected(false);
         _eventLogs.insert(
           0,
-          '[${DateTime.now().toLocal()}] Mock link disconnected ($reason)',
+          '[${DateTime.now().toLocal()}] Demo link disconnected ($reason)',
         );
         _trimLogs();
       });
-      _showActionMessage('Mock disconnected. Reason: $reason');
+      _showActionMessage('Demo disconnected. Reason: $reason');
       return;
     }
 
@@ -1128,7 +1128,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     }
 
     if (!enabled && _acquisitionService.isBridgeRunning) {
-      await _disconnectConnection(reason: 'switched to mock source');
+      await _disconnectConnection(reason: 'switched to demo source');
     }
 
     if (!mounted) {
@@ -1148,7 +1148,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       _isConnected = enabled ? _acquisitionService.isBridgeRunning : true;
       _eventLogs.insert(
         0,
-        '[${DateTime.now().toLocal()}] Data source: ${enabled ? 'NI-DAQmx bridge (multi-channel)' : 'Mock'}',
+        '[${DateTime.now().toLocal()}] Data source: ${enabled ? 'NI-DAQmx bridge (multi-channel)' : 'Demo'}',
       );
     });
     unawaited(_saveSettings());
@@ -1525,16 +1525,32 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         actions: <Widget>[
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            child: FilledButton.tonalIcon(
-              onPressed: _toggleConnection,
-              icon: Icon(_isConnected ? Icons.link : Icons.link_off),
-              label: Text(
-                _useBridge
-                    ? (_isConnected
-                          ? 'Bridge Connected'
-                          : 'Bridge Disconnected')
-                    : (_isConnected ? 'Mock Connected' : 'Mock Disconnected'),
-              ),
+            child: Row(
+              children: <Widget>[
+                FilledButton.tonalIcon(
+                  onPressed: _toggleRun,
+                  icon: Icon(_isRunning ? Icons.pause : Icons.play_arrow),
+                  label: Text(_isRunning ? 'Running' : 'Paused'),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.tonalIcon(
+                  onPressed: () {
+                    unawaited(_toggleDataSource(!_useBridge));
+                  },
+                  icon: const Icon(Icons.swap_horiz),
+                  label: Text(_useBridge ? 'Bridge Source' : 'Demo Source'),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.tonalIcon(
+                  onPressed: _toggleConnection,
+                  icon: Icon(_isConnected ? Icons.link : Icons.link_off),
+                  label: Text(
+                    _useBridge
+                        ? (_isConnected ? 'Bridge Connected' : 'Bridge Disconnected')
+                        : (_isConnected ? 'Demo Connected' : 'Demo Disconnected'),
+                  ),
+                ),
+              ],
             ),
           ),
         ],
@@ -1902,9 +1918,9 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         mags.length,
         (int k) => (k + 1) * srHz / fftN,
       );
-      sourceLabel = _useBridge
+        sourceLabel = _useBridge
           ? 'Bridge FFT (hardware)'
-          : 'Mock FFT (10kHz block simulation)';
+          : 'Demo FFT (10kHz block simulation)';
     } else {
       final ({
         List<double> freqs,
@@ -1917,7 +1933,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       mags = r.mags;
       srHz = r.sampleRateHz;
       samplesUsed = r.samplesUsed;
-      sourceLabel = 'Dart FFT (mock / RMS envelope)';
+      sourceLabel = 'Dart FFT (demo / RMS envelope)';
     }
 
     final double peakMag = mags.isEmpty ? 0.0 : mags.reduce(max);
@@ -1982,7 +1998,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
               runSpacing: 4,
               children: <Widget>[
                 Text(
-                  'DBG FFT ${hasFrameFft ? (_useBridge ? 'bridge' : 'mock-frame') : 'mock-fallback'}',
+                  'DBG FFT ${hasFrameFft ? (_useBridge ? 'bridge' : 'demo-frame') : 'demo-fallback'}',
                   style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
@@ -2277,7 +2293,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         const SizedBox(height: 8),
         if (hasData)
           Text(
-            'Oscilloscope (${hasFrameData ? 'bridge' : 'mock'})  |  N=$outCount  |  Fs: ${effectiveFsHz.toStringAsFixed(1)} Hz'
+            'Oscilloscope (${hasFrameData ? 'bridge' : 'demo'})  |  N=$outCount  |  Fs: ${effectiveFsHz.toStringAsFixed(1)} Hz'
             '  |  Block: ${blockMs.toStringAsFixed(1)} ms'
             '  |  Window: ${displayTimeWindowMs.toStringAsFixed(1)} ms'
             '${hasFrameData ? '  |  Decim: ×$_bridgeWaveDecimStep' : ''}',
@@ -2298,7 +2314,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
               runSpacing: 4,
               children: <Widget>[
                 Text(
-                  'DBG WAVE ${waveInVoltage ? 'bridge' : 'mock'}',
+                  'DBG WAVE ${waveInVoltage ? 'bridge' : 'demo'}',
                   style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
@@ -2342,7 +2358,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
           child: !hasData
               ? const Center(
                   child: Text(
-                    'Chưa đủ dữ liệu sóng (mock cần >= 2 mẫu)',
+                    'Chưa đủ dữ liệu sóng (demo cần >= 2 mẫu)',
                     style: TextStyle(fontSize: 13, color: Color(0xFF5E6A79)),
                   ),
                 )
@@ -2694,9 +2710,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                               children: <Widget>[
                                 Expanded(child: _buildFftPanel(compact: true)),
                                 const SizedBox(height: 10),
-                                Expanded(
-                                  child: _buildWavePanel(compact: true),
-                                ),
+                                Expanded(child: _buildWavePanel(compact: true)),
                               ],
                             ),
                           ),
@@ -2975,6 +2989,49 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                 Text(
                   'Current chart scale: ${_chartMinG.toStringAsFixed(2)} g .. ${_chartMaxG.toStringAsFixed(2)} g',
                 ),
+                const SizedBox(height: 14),
+                const Divider(height: 1),
+                const SizedBox(height: 14),
+                const Text(
+                  'Alert Thresholds',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: _thresholdEditor(
+                        title: 'Ngưỡng cảnh báo',
+                        value: _warningThreshold,
+                        onChanged: (double value) {
+                          setState(() {
+                            _warningThreshold = value;
+                            if (_warningThreshold >= _dangerThreshold) {
+                              _dangerThreshold = (_warningThreshold + 0.05)
+                                  .clamp(_chartMinG, _chartMaxG);
+                            }
+                          });
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: _thresholdEditor(
+                        title: 'Ngưỡng cảnh báo 2',
+                        value: _dangerThreshold,
+                        onChanged: (double value) {
+                          setState(() {
+                            _dangerThreshold = value;
+                            if (_dangerThreshold <= _warningThreshold) {
+                              _warningThreshold = (_dangerThreshold - 0.05)
+                                  .clamp(_chartMinG, _chartMaxG);
+                            }
+                          });
+                        },
+                      ),
+                    ),
+                  ],
+                ),
               ],
             ),
           ),
@@ -2990,7 +3047,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                   _actualSamplesPerRead != null
               ? 'Actual: ${_actualSampleRateHz!} Hz | ${_actualSamplesPerRead!} samples/read'
               : 'Actual: waiting for bridge data...')
-        : 'Actual: mock source';
+        : 'Actual: demo source';
 
     return Card(
       child: Padding(
@@ -3041,23 +3098,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
               style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
             ),
             const SizedBox(height: 8),
-            SwitchListTile.adaptive(
-              contentPadding: EdgeInsets.zero,
-              title: Text(
-                Platform.isWindows
-                    ? 'Use built-in NI-DAQ bridge (multi-channel)'
-                    : 'Use external DAQ bridge (multi-channel)',
-              ),
-              subtitle: Text(
-                Platform.isWindows
-                    ? 'Optional. On Windows the app reads NI-DAQmx directly.'
-                    : 'Optional. Keep off to run mock-only mode.',
-              ),
-              value: _useBridge,
-              onChanged: (bool enabled) {
-                unawaited(_toggleDataSource(enabled));
-              },
-            ),
             TextField(
               controller: _bridgePathController,
               enabled: !Platform.isWindows,
@@ -3087,65 +3127,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                 });
                 _syncAcquisitionSignalUnit();
               },
-            ),
-            const SizedBox(height: 4),
-            Row(
-              children: <Widget>[
-                FilledButton.icon(
-                  onPressed: _toggleRun,
-                  icon: Icon(_isRunning ? Icons.pause : Icons.play_arrow),
-                  label: Text(_isRunning ? 'Pause stream' : 'Resume stream'),
-                ),
-                const SizedBox(width: 10),
-                Text(_isRunning ? 'Running' : 'Paused'),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: <Widget>[
-                FilledButton.icon(
-                  onPressed: _isConnected ? null : _connectConnection,
-                  icon: const Icon(Icons.link),
-                  label: const Text('Connect'),
-                ),
-                const SizedBox(width: 10),
-                OutlinedButton.icon(
-                  onPressed: _isConnected
-                      ? () async {
-                          final bool shouldDisconnect =
-                              await _confirmDisconnectConnection();
-                          if (!shouldDisconnect) {
-                            return;
-                          }
-                          await _disconnectConnection(
-                            reason: 'control panel button',
-                          );
-                        }
-                      : null,
-                  icon: const Icon(Icons.link_off),
-                  label: const Text('Disconnect'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: <Widget>[
-                Icon(
-                  Icons.circle,
-                  size: 12,
-                  color: _isConnected
-                      ? const Color(0xFF2E8B57)
-                      : const Color(0xFFC0392B),
-                ),
-                const SizedBox(width: 6),
-                Text(
-                  _isConnected
-                      ? (_useBridge ? 'Bridge connected' : 'Mock connected')
-                      : (_useBridge
-                            ? 'Bridge disconnected'
-                            : 'Mock disconnected'),
-                ),
-              ],
             ),
             const SizedBox(height: 10),
             Text(
@@ -3216,45 +3197,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                 ),
               ),
             ],
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: _thresholdEditor(
-                    title: 'Ngưỡng cảnh báo',
-                    value: _warningThreshold,
-                    onChanged: (double value) {
-                      setState(() {
-                        _warningThreshold = value;
-                        if (_warningThreshold >= _dangerThreshold) {
-                          _dangerThreshold = (_warningThreshold + 0.05).clamp(
-                            _chartMinG,
-                            _chartMaxG,
-                          );
-                        }
-                      });
-                    },
-                  ),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: _thresholdEditor(
-                    title: 'Ngưỡng cảnh báo 2',
-                    value: _dangerThreshold,
-                    onChanged: (double value) {
-                      setState(() {
-                        _dangerThreshold = value;
-                        if (_dangerThreshold <= _warningThreshold) {
-                          _warningThreshold = (_dangerThreshold - 0.05).clamp(
-                            _chartMinG,
-                            _chartMaxG,
-                          );
-                        }
-                      });
-                    },
-                  ),
-                ),
-              ],
-            ),
           ],
         ),
       ),
