@@ -1,11 +1,12 @@
 # Mine Alert Flutter
 
-Flutter dashboard for monitoring a mine-alert sensor system. The current build uses mock realtime data and is structured to later connect to a real NI-DAQmx data bridge.
+Flutter dashboard for monitoring a mine-alert sensor system. On Windows, the app can now talk to NI-DAQmx directly in-process without launching a separate bridge executable.
 
 ## Features
 
 - Realtime simulated channels (`AI0..AI7`) with live line charts
-- Optional external NI-DAQmx bridge source at `48 kHz` (MIC)
+- Built-in Windows NI-DAQmx bridge for direct hardware access
+- Optional external bridge fallback for non-Windows targets
 - Configurable warning/danger thresholds
 - Acquisition controls (run/pause, sample interval)
 - Event log when channels enter warning/danger state
@@ -17,7 +18,7 @@ Flutter dashboard for monitoring a mine-alert sensor system. The current build u
 The app now uses a dedicated acquisition service layer:
 
 - `lib/data_acquisition_service.dart`: orchestrates data source mode (`mock` or `bridge`), run/pause, and sample emission
-- `lib/daq_bridge_client.dart`: low-level process runner + stdout parser for external adapter
+- `lib/daq_bridge_client.dart`: low-level bridge client that uses the in-process Windows bridge or an external adapter on other platforms
 - `lib/main.dart`: UI-only state rendering and controls
 
 This structure keeps hardware-specific integration outside the dashboard UI.
@@ -35,8 +36,9 @@ This structure keeps hardware-specific integration outside the dashboard UI.
 
 1. Start app in mock mode by default.
 2. Enable switch in UI:
-	- `Use external DAQ bridge (MIC 48 kHz)`
-3. Provide your own adapter executable path and arguments in the control panel.
+	- `Use built-in NI-DAQ bridge (multi-channel)` on Windows
+	- `Use external DAQ bridge (multi-channel)` on other platforms
+3. On Windows, NI-DAQmx is loaded directly inside the app. On other platforms, provide your own adapter executable path and arguments in the control panel.
 
 Expected adapter output protocol (stdout, one line per frame):
 
@@ -46,6 +48,7 @@ Expected adapter output protocol (stdout, one line per frame):
 Example adapter arguments (if your adapter supports them):
 - `--stream --rate 48000 --samples 2400`
 
-## Next Integration Step
+## Notes
 
-The folder `cdaq-9181-console` in this workspace is reference material only. The Flutter app is not hard-coupled to it.
+- The folder `cdaq-9181-console` still contains the reference console implementation and can be used to compare protocol behavior.
+- The Windows desktop app no longer needs to launch `cdaq9181_console.exe` as a separate process.
