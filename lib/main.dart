@@ -105,7 +105,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   String _lastAutoFallbackReason = '';
   int _selectedScreenIndex = 0;
   int _selectedCombinedWindowMinutes = -1;
-  int _combinedViewTab = 0; // 0 = time domain, 1 = FFT, 2 = waveform
   String _fftChannel = 'AI0';
 
   // Latest FFT from C bridge (bridge mode only; empty in mock mode)
@@ -1881,7 +1880,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     return p;
   }
 
-  Widget _buildFftPanel() {
+  Widget _buildFftPanel({bool compact = false}) {
     // ── Prefer real FFT from bridge; fall back to Dart-computed FFT (mock) ──
     final bool hasFrameFft =
         _bridgeFftBinCount > 1 && _bridgeFftMags.containsKey(_fftChannel);
@@ -1928,8 +1927,10 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        _buildSamplingInfoCard(),
-        const SizedBox(height: 8),
+        if (!compact) ...<Widget>[
+          _buildSamplingInfoCard(),
+          const SizedBox(height: 8),
+        ],
         // Channel selector
         Row(
           children: <Widget>[
@@ -1966,50 +1967,67 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
             '$sourceLabel  |  N=$samplesUsed  |  Fs: ${srHz.toStringAsFixed(0)} Hz  |  Δf: ${(srHz / (samplesUsed > 0 ? samplesUsed : 1)).toStringAsFixed(3)} Hz/bin  |  Nyquist: ${(srHz / 2).toStringAsFixed(0)} Hz',
             style: const TextStyle(fontSize: 11, color: Color(0xFF5E6A79)),
           ),
-        const SizedBox(height: 6),
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-          decoration: BoxDecoration(
-            color: const Color(0xFFF0F4F9),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: const Color(0xFFD8E1EC)),
-          ),
-          child: Wrap(
-            spacing: 10,
-            runSpacing: 4,
-            children: <Widget>[
-              Text(
-                'DBG FFT ${hasFrameFft ? (_useBridge ? 'bridge' : 'mock-frame') : 'mock-fallback'}',
-                style: const TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  color: Color(0xFF2F3B4A),
+        if (!compact) ...<Widget>[
+          const SizedBox(height: 6),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF0F4F9),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFFD8E1EC)),
+            ),
+            child: Wrap(
+              spacing: 10,
+              runSpacing: 4,
+              children: <Widget>[
+                Text(
+                  'DBG FFT ${hasFrameFft ? (_useBridge ? 'bridge' : 'mock-frame') : 'mock-fallback'}',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF2F3B4A),
+                  ),
                 ),
-              ),
-              Text(
-                'N=$samplesUsed',
-                style: const TextStyle(fontSize: 11, color: Color(0xFF4B5B6B)),
-              ),
-              Text(
-                'Bins=${mags.length}',
-                style: const TextStyle(fontSize: 11, color: Color(0xFF4B5B6B)),
-              ),
-              Text(
-                'Fs=${srHz.toStringAsFixed(1)} Hz',
-                style: const TextStyle(fontSize: 11, color: Color(0xFF4B5B6B)),
-              ),
-              Text(
-                'Min=${minMag.toStringAsFixed(4)}',
-                style: const TextStyle(fontSize: 11, color: Color(0xFF4B5B6B)),
-              ),
-              Text(
-                'Max=${peakMag.toStringAsFixed(4)}',
-                style: const TextStyle(fontSize: 11, color: Color(0xFF4B5B6B)),
-              ),
-            ],
+                Text(
+                  'N=$samplesUsed',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF4B5B6B),
+                  ),
+                ),
+                Text(
+                  'Bins=${mags.length}',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF4B5B6B),
+                  ),
+                ),
+                Text(
+                  'Fs=${srHz.toStringAsFixed(1)} Hz',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF4B5B6B),
+                  ),
+                ),
+                Text(
+                  'Min=${minMag.toStringAsFixed(4)}',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF4B5B6B),
+                  ),
+                ),
+                Text(
+                  'Max=${peakMag.toStringAsFixed(4)}',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF4B5B6B),
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
+        ],
         const SizedBox(height: 8),
         Expanded(
           child: freqs.isEmpty
@@ -2122,7 +2140,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     );
   }
 
-  Widget _buildWavePanel() {
+  Widget _buildWavePanel({bool compact = false}) {
     final List<double>? bridgeSamples = _bridgeWaveSamples[_waveChannel];
     final bool hasFrameData =
         bridgeSamples != null &&
@@ -2164,8 +2182,10 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        _buildSamplingInfoCard(),
-        const SizedBox(height: 8),
+        if (!compact) ...<Widget>[
+          _buildSamplingInfoCard(),
+          const SizedBox(height: 8),
+        ],
         Row(
           children: <Widget>[
             const Text(
@@ -2193,65 +2213,67 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
             ),
           ],
         ),
-        const SizedBox(height: 8),
-        Row(
-          children: <Widget>[
-            const Text(
-              'Thang thời gian (ms):',
-              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
-            ),
-            const SizedBox(width: 8),
-            SizedBox(
-              width: 80,
-              child: TextField(
-                controller: _waveformTimeWindowController,
-                keyboardType: const TextInputType.numberWithOptions(
-                  decimal: true,
-                ),
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 12),
-                decoration: InputDecoration(
-                  isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 6,
-                  ),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(6),
-                    borderSide: const BorderSide(color: Color(0xFFDDDDDD)),
-                  ),
-                ),
-                onChanged: (String value) {
-                  final double? parsed = double.tryParse(value);
-                  if (parsed != null && parsed > 0) {
-                    setState(() => _waveformTimeWindowMs = parsed);
-                  }
-                },
+        if (!compact) ...<Widget>[
+          const SizedBox(height: 8),
+          Row(
+            children: <Widget>[
+              const Text(
+                'Thang thời gian (ms):',
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
               ),
-            ),
-            const SizedBox(width: 12),
-            Tooltip(
-              message: 'Tự động (full block)',
-              child: ElevatedButton.icon(
-                onPressed: () {
-                  setState(() {
-                    _waveformTimeWindowMs = blockMs;
-                    _waveformTimeWindowController.text = blockMs
-                        .toStringAsFixed(1);
-                  });
-                },
-                icon: const Icon(Icons.auto_awesome, size: 14),
-                label: const Text('Auto', style: TextStyle(fontSize: 11)),
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 6,
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 80,
+                child: TextField(
+                  controller: _waveformTimeWindowController,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
                   ),
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 12),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 6,
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(6),
+                      borderSide: const BorderSide(color: Color(0xFFDDDDDD)),
+                    ),
+                  ),
+                  onChanged: (String value) {
+                    final double? parsed = double.tryParse(value);
+                    if (parsed != null && parsed > 0) {
+                      setState(() => _waveformTimeWindowMs = parsed);
+                    }
+                  },
                 ),
               ),
-            ),
-          ],
-        ),
+              const SizedBox(width: 12),
+              Tooltip(
+                message: 'Tự động (full block)',
+                child: ElevatedButton.icon(
+                  onPressed: () {
+                    setState(() {
+                      _waveformTimeWindowMs = blockMs;
+                      _waveformTimeWindowController.text = blockMs
+                          .toStringAsFixed(1);
+                    });
+                  },
+                  icon: const Icon(Icons.auto_awesome, size: 14),
+                  label: const Text('Auto', style: TextStyle(fontSize: 11)),
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 6,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
         const SizedBox(height: 8),
         if (hasData)
           Text(
@@ -2261,46 +2283,60 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
             '${hasFrameData ? '  |  Decim: ×$_bridgeWaveDecimStep' : ''}',
             style: const TextStyle(fontSize: 11, color: Color(0xFF5E6A79)),
           ),
-        const SizedBox(height: 6),
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-          decoration: BoxDecoration(
-            color: const Color(0xFFF0F4F9),
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: const Color(0xFFD8E1EC)),
-          ),
-          child: Wrap(
-            spacing: 10,
-            runSpacing: 4,
-            children: <Widget>[
-              Text(
-                'DBG WAVE ${waveInVoltage ? 'bridge' : 'mock'}',
-                style: const TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  color: Color(0xFF2F3B4A),
+        if (!compact) ...<Widget>[
+          const SizedBox(height: 6),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF0F4F9),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFFD8E1EC)),
+            ),
+            child: Wrap(
+              spacing: 10,
+              runSpacing: 4,
+              children: <Widget>[
+                Text(
+                  'DBG WAVE ${waveInVoltage ? 'bridge' : 'mock'}',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF2F3B4A),
+                  ),
                 ),
-              ),
-              Text(
-                'N=$outCount',
-                style: const TextStyle(fontSize: 11, color: Color(0xFF4B5B6B)),
-              ),
-              Text(
-                'Fs=${effectiveFsHz.toStringAsFixed(1)} Hz',
-                style: const TextStyle(fontSize: 11, color: Color(0xFF4B5B6B)),
-              ),
-              Text(
-                'Min=${minSample.toStringAsFixed(4)} $valueUnit',
-                style: const TextStyle(fontSize: 11, color: Color(0xFF4B5B6B)),
-              ),
-              Text(
-                'Max=${maxSample.toStringAsFixed(4)} $valueUnit',
-                style: const TextStyle(fontSize: 11, color: Color(0xFF4B5B6B)),
-              ),
-            ],
+                Text(
+                  'N=$outCount',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF4B5B6B),
+                  ),
+                ),
+                Text(
+                  'Fs=${effectiveFsHz.toStringAsFixed(1)} Hz',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF4B5B6B),
+                  ),
+                ),
+                Text(
+                  'Min=${minSample.toStringAsFixed(4)} $valueUnit',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF4B5B6B),
+                  ),
+                ),
+                Text(
+                  'Max=${maxSample.toStringAsFixed(4)} $valueUnit',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF4B5B6B),
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
+        ],
         const SizedBox(height: 8),
         Expanded(
           child: !hasData
@@ -2442,6 +2478,168 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     }
 
     final double xInterval = _combinedXAxisIntervalSeconds(maxVisibleX);
+    final bool isWide = constraints.maxWidth >= 1260;
+
+    final Widget combinedTimePanel = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        _buildSamplingInfoCard(),
+        const SizedBox(height: 8),
+        Row(
+          children: <Widget>[
+            Text(
+              'Hiển thị ${visibleChannels.length}/${_channels.length} kênh',
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF5E6A79),
+              ),
+            ),
+            const Spacer(),
+            TextButton(
+              onPressed: () {
+                setState(() {
+                  _hiddenCombinedChannels.clear();
+                });
+              },
+              child: const Text('Hiện tất cả'),
+            ),
+            TextButton(
+              onPressed: () {
+                setState(() {
+                  _hiddenCombinedChannels
+                    ..clear()
+                    ..addAll(_channels);
+                });
+              },
+              child: const Text('Bỏ tất cả'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Expanded(
+          child: visibleChannels.isEmpty
+              ? const Center(
+                  child: Text(
+                    'Chưa có kênh nào được chọn',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF5E6A79),
+                    ),
+                  ),
+                )
+              : LineChart(
+                  duration: Duration.zero,
+                  curve: Curves.linear,
+                  LineChartData(
+                    minX: 0,
+                    maxX: maxVisibleX,
+                    minY: _chartMinG,
+                    maxY: _chartMaxG,
+                    clipData: FlClipData.all(),
+                    lineTouchData: const LineTouchData(enabled: false),
+                    gridData: FlGridData(
+                      show: true,
+                      drawVerticalLine: false,
+                      horizontalInterval: max(chartRange / 6, 0.05),
+                      getDrawingHorizontalLine: (_) => FlLine(
+                        color: const Color(0xFFE8EDF3),
+                        strokeWidth: 1,
+                      ),
+                    ),
+                    extraLinesData: ExtraLinesData(
+                      horizontalLines: <HorizontalLine>[
+                        HorizontalLine(
+                          y: _warningThreshold,
+                          color: const Color(0xFFE4A100).withValues(alpha: 0.5),
+                          strokeWidth: 1.6,
+                          dashArray: <int>[5, 5],
+                        ),
+                        HorizontalLine(
+                          y: _dangerThreshold,
+                          color: const Color(0xFFC0392B).withValues(alpha: 0.5),
+                          strokeWidth: 1.6,
+                          dashArray: <int>[5, 5],
+                        ),
+                      ],
+                    ),
+                    titlesData: FlTitlesData(
+                      leftTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false),
+                      ),
+                      rightTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false),
+                      ),
+                      topTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false),
+                      ),
+                      bottomTitles: AxisTitles(
+                        sideTitles: SideTitles(
+                          showTitles: true,
+                          reservedSize: 22,
+                          interval: xInterval,
+                          getTitlesWidget: (double value, TitleMeta meta) {
+                            return _buildCombinedBottomTitle(
+                              value,
+                              meta,
+                              maxVisibleX,
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                    borderData: FlBorderData(show: false),
+                    lineBarsData: lineBars,
+                  ),
+                ),
+        ),
+        const SizedBox(height: 8),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF5F8FB),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Wrap(
+            spacing: 10,
+            runSpacing: 6,
+            children: _channels.map((String channel) {
+              final Color color = _channelColor(channel);
+              final bool selected = _isCombinedChannelVisible(channel);
+              return FilterChip(
+                selected: selected,
+                onSelected: (bool isSelected) {
+                  setState(() {
+                    if (isSelected) {
+                      _hiddenCombinedChannels.remove(channel);
+                    } else {
+                      _hiddenCombinedChannels.add(channel);
+                    }
+                  });
+                },
+                avatar: Container(
+                  width: 10,
+                  height: 10,
+                  decoration: BoxDecoration(
+                    color: color,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                label: Text(
+                  channel,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+      ],
+    );
 
     return Padding(
       padding: const EdgeInsets.all(12),
@@ -2461,238 +2659,61 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                       fontWeight: FontWeight.w700,
                     ),
                   ),
-                  const Spacer(),
-                  SegmentedButton<int>(
-                    segments: const <ButtonSegment<int>>[
-                      ButtonSegment<int>(
-                        value: 0,
-                        icon: Icon(Icons.multiline_chart, size: 16),
-                        label: Text('Biểu đồ'),
-                      ),
-                      ButtonSegment<int>(
-                        value: 1,
-                        icon: Icon(Icons.equalizer, size: 16),
-                        label: Text('FFT'),
-                      ),
-                      ButtonSegment<int>(
-                        value: 2,
-                        icon: Icon(Icons.show_chart, size: 16),
-                        label: Text('Sóng'),
-                      ),
-                    ],
-                    selected: <int>{_combinedViewTab},
-                    onSelectionChanged: (Set<int> sel) {
-                      setState(() => _combinedViewTab = sel.first);
-                    },
-                  ),
                 ],
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: _combinedWindowOptions.map((
+                  _CombinedWindowOption option,
+                ) {
+                  final bool selected =
+                      _selectedCombinedWindowMinutes == option.minutes;
+                  return ChoiceChip(
+                    label: Text(option.label),
+                    selected: selected,
+                    onSelected: (_) {
+                      setState(() {
+                        _selectedCombinedWindowMinutes = option.minutes;
+                      });
+                    },
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 6),
               Expanded(
-                child: _combinedViewTab == 1
-                    ? _buildFftPanel()
-                    : _combinedViewTab == 2
-                    ? _buildWavePanel()
-                    : Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                child: isWide
+                    ? Row(
                         children: <Widget>[
-                          _buildSamplingInfoCard(),
-                          const SizedBox(height: 8),
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 6,
-                            children: _combinedWindowOptions.map((
-                              _CombinedWindowOption option,
-                            ) {
-                              final bool selected =
-                                  _selectedCombinedWindowMinutes ==
-                                  option.minutes;
-                              return ChoiceChip(
-                                label: Text(option.label),
-                                selected: selected,
-                                onSelected: (_) {
-                                  setState(() {
-                                    _selectedCombinedWindowMinutes =
-                                        option.minutes;
-                                  });
-                                },
-                              );
-                            }).toList(),
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: <Widget>[
-                              Text(
-                                'Hiển thị ${visibleChannels.length}/${_channels.length} kênh',
-                                style: const TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                  color: Color(0xFF5E6A79),
-                                ),
-                              ),
-                              const Spacer(),
-                              TextButton(
-                                onPressed: () {
-                                  setState(() {
-                                    _hiddenCombinedChannels.clear();
-                                  });
-                                },
-                                child: const Text('Hiện tất cả'),
-                              ),
-                              TextButton(
-                                onPressed: () {
-                                  setState(() {
-                                    _hiddenCombinedChannels
-                                      ..clear()
-                                      ..addAll(_channels);
-                                  });
-                                },
-                                child: const Text('Bỏ tất cả'),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 6),
+                          Expanded(flex: 7, child: combinedTimePanel),
+                          const SizedBox(width: 10),
                           Expanded(
-                            child: visibleChannels.isEmpty
-                                ? const Center(
-                                    child: Text(
-                                      'Chưa có kênh nào được chọn',
-                                      style: TextStyle(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w600,
-                                        color: Color(0xFF5E6A79),
-                                      ),
-                                    ),
-                                  )
-                                : LineChart(
-                                    duration: Duration.zero,
-                                    curve: Curves.linear,
-                                    LineChartData(
-                                      minX: 0,
-                                      maxX: maxVisibleX,
-                                      minY: _chartMinG,
-                                      maxY: _chartMaxG,
-                                      clipData: FlClipData.all(),
-                                      lineTouchData: const LineTouchData(
-                                        enabled: false,
-                                      ),
-                                      gridData: FlGridData(
-                                        show: true,
-                                        drawVerticalLine: false,
-                                        horizontalInterval: max(
-                                          chartRange / 6,
-                                          0.05,
-                                        ),
-                                        getDrawingHorizontalLine: (_) => FlLine(
-                                          color: const Color(0xFFE8EDF3),
-                                          strokeWidth: 1,
-                                        ),
-                                      ),
-                                      extraLinesData: ExtraLinesData(
-                                        horizontalLines: <HorizontalLine>[
-                                          HorizontalLine(
-                                            y: _warningThreshold,
-                                            color: const Color(
-                                              0xFFE4A100,
-                                            ).withValues(alpha: 0.5),
-                                            strokeWidth: 1.6,
-                                            dashArray: <int>[5, 5],
-                                          ),
-                                          HorizontalLine(
-                                            y: _dangerThreshold,
-                                            color: const Color(
-                                              0xFFC0392B,
-                                            ).withValues(alpha: 0.5),
-                                            strokeWidth: 1.6,
-                                            dashArray: <int>[5, 5],
-                                          ),
-                                        ],
-                                      ),
-                                      titlesData: FlTitlesData(
-                                        leftTitles: const AxisTitles(
-                                          sideTitles: SideTitles(
-                                            showTitles: false,
-                                          ),
-                                        ),
-                                        rightTitles: const AxisTitles(
-                                          sideTitles: SideTitles(
-                                            showTitles: false,
-                                          ),
-                                        ),
-                                        topTitles: const AxisTitles(
-                                          sideTitles: SideTitles(
-                                            showTitles: false,
-                                          ),
-                                        ),
-                                        bottomTitles: AxisTitles(
-                                          sideTitles: SideTitles(
-                                            showTitles: true,
-                                            reservedSize: 22,
-                                            interval: xInterval,
-                                            getTitlesWidget:
-                                                (double value, TitleMeta meta) {
-                                                  return _buildCombinedBottomTitle(
-                                                    value,
-                                                    meta,
-                                                    maxVisibleX,
-                                                  );
-                                                },
-                                          ),
-                                        ),
-                                      ),
-                                      borderData: FlBorderData(show: false),
-                                      lineBarsData: lineBars,
-                                    ),
-                                  ),
+                            flex: 5,
+                            child: Column(
+                              children: <Widget>[
+                                Expanded(child: _buildFftPanel(compact: true)),
+                                const SizedBox(height: 10),
+                                Expanded(
+                                  child: _buildWavePanel(compact: true),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      )
+                    : Column(
+                        children: <Widget>[
+                          Expanded(flex: 4, child: combinedTimePanel),
+                          const SizedBox(height: 10),
+                          Expanded(
+                            flex: 3,
+                            child: _buildFftPanel(compact: true),
                           ),
                           const SizedBox(height: 10),
-                          Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 8,
-                            ),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFF5F8FB),
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                            child: Wrap(
-                              spacing: 10,
-                              runSpacing: 6,
-                              children: _channels.map((String channel) {
-                                final Color color = _channelColor(channel);
-                                final bool selected = _isCombinedChannelVisible(
-                                  channel,
-                                );
-                                return FilterChip(
-                                  selected: selected,
-                                  onSelected: (bool isSelected) {
-                                    setState(() {
-                                      if (isSelected) {
-                                        _hiddenCombinedChannels.remove(channel);
-                                      } else {
-                                        _hiddenCombinedChannels.add(channel);
-                                      }
-                                    });
-                                  },
-                                  avatar: Container(
-                                    width: 10,
-                                    height: 10,
-                                    decoration: BoxDecoration(
-                                      color: color,
-                                      borderRadius: BorderRadius.circular(2),
-                                    ),
-                                  ),
-                                  label: Text(
-                                    channel,
-                                    style: const TextStyle(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                );
-                              }).toList(),
-                            ),
+                          Expanded(
+                            flex: 3,
+                            child: _buildWavePanel(compact: true),
                           ),
                         ],
                       ),

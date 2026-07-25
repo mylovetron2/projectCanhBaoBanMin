@@ -168,7 +168,8 @@ class DataAcquisitionService {
       final double env1 =
           1.0 + 0.55 * sin(2 * pi * (0.65 + i * 0.02) * blockStartSec + phase);
       final double env2 =
-          1.0 + 0.45 * sin(2 * pi * (1.15 + i * 0.015) * blockStartSec + phase * 0.8);
+          1.0 +
+          0.45 * sin(2 * pi * (1.15 + i * 0.015) * blockStartSec + phase * 0.8);
 
       final List<double> channelBlock = List<double>.filled(
         samplesPerRead,
@@ -181,14 +182,14 @@ class DataAcquisitionService {
         final double noise = (_random.nextDouble() - 0.5) * 0.09;
         final bool hasImpulse = _random.nextDouble() < 0.0018;
         final double impulse = hasImpulse
-          ? ((_random.nextDouble() - 0.5) * 0.7)
+            ? ((_random.nextDouble() - 0.5) * 0.7)
             : 0.0;
         final double drift = 0.08 * sin(2 * pi * 0.22 * t + phase * 0.35);
         final double sample =
-          0.40 +
-          (amp1 * env1) * sin(2 * pi * lowFreqHz * t + phase) +
-          (amp2 * env2) * sin(2 * pi * midFreqHz * t + phase * 0.7) +
-          drift +
+            0.40 +
+            (amp1 * env1) * sin(2 * pi * lowFreqHz * t + phase) +
+            (amp2 * env2) * sin(2 * pi * midFreqHz * t + phase * 0.7) +
+            drift +
             noise +
             impulse;
         final double clamped = sample.clamp(0.0, 1.2).toDouble();
