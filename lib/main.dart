@@ -18,16 +18,62 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    const ColorScheme appColors = ColorScheme(
+      brightness: Brightness.light,
+      primary: Color(0xFF0B4F8A),
+      onPrimary: Colors.white,
+      secondary: Color(0xFF1F7A8C),
+      onSecondary: Colors.white,
+      error: Color(0xFFB3261E),
+      onError: Colors.white,
+      surface: Color(0xFFF7FAFC),
+      onSurface: Color(0xFF1E2936),
+      primaryContainer: Color(0xFFD9EAF7),
+      onPrimaryContainer: Color(0xFF082E52),
+      secondaryContainer: Color(0xFFD9EEF2),
+      onSecondaryContainer: Color(0xFF123D47),
+      errorContainer: Color(0xFFF9DEDC),
+      onErrorContainer: Color(0xFF410E0B),
+      surfaceContainerHighest: Color(0xFFE8EEF4),
+      onSurfaceVariant: Color(0xFF4A5A6A),
+      outline: Color(0xFFC8D4E0),
+      outlineVariant: Color(0xFFD9E2EC),
+      shadow: Color(0x33000000),
+      scrim: Color(0x66000000),
+      inverseSurface: Color(0xFF243447),
+      onInverseSurface: Color(0xFFF2F6FA),
+      inversePrimary: Color(0xFF8CBEE8),
+      surfaceTint: Color(0xFF0B4F8A),
+    );
+
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'Cảnh báo bắn mìn - Địa vật lý Giếng Khoang',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF005A9C),
-          brightness: Brightness.light,
+        colorScheme: appColors,
+        scaffoldBackgroundColor: const Color(0xFFF2F6FB),
+        canvasColor: const Color(0xFFF2F6FB),
+        dividerColor: const Color(0xFFD7E0EA),
+        visualDensity: VisualDensity.standard,
+        textTheme: const TextTheme(
+          titleLarge: TextStyle(
+            fontWeight: FontWeight.w700,
+            color: Color(0xFF1E2936),
+          ),
+          titleMedium: TextStyle(
+            fontWeight: FontWeight.w700,
+            color: Color(0xFF1E2936),
+          ),
+          bodyMedium: TextStyle(color: Color(0xFF2E3C4A), height: 1.35),
+          bodySmall: TextStyle(color: Color(0xFF5A6878), height: 1.3),
+          labelLarge: TextStyle(fontWeight: FontWeight.w600),
         ),
-        scaffoldBackgroundColor: const Color(0xFFF5F8FB),
         appBarTheme: const AppBarTheme(
+          backgroundColor: Color(0xFFEAF3FB),
+          foregroundColor: Color(0xFF1A2530),
+          elevation: 0,
+          scrolledUnderElevation: 0,
+          centerTitle: false,
           titleTextStyle: TextStyle(
             fontSize: 18,
             fontWeight: FontWeight.w700,
@@ -38,6 +84,106 @@ class MyApp extends StatelessWidget {
               'Noto Sans',
               'sans-serif',
             ],
+          ),
+        ),
+        cardTheme: CardThemeData(
+          color: Colors.white,
+          elevation: 0,
+          margin: EdgeInsets.zero,
+          clipBehavior: Clip.antiAlias,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: const BorderSide(color: Color(0xFFDCE5EF)),
+          ),
+        ),
+        filledButtonTheme: FilledButtonThemeData(
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xFF0B4F8A),
+            foregroundColor: Colors.white,
+            elevation: 0,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+            textStyle: const TextStyle(fontWeight: FontWeight.w700),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: const Color(0xFF0B4F8A),
+            side: const BorderSide(color: Color(0xFFB6CCE2)),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            textStyle: const TextStyle(fontWeight: FontWeight.w600),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
+          ),
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: const Color(0xFFF7FAFD),
+          isDense: true,
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 12,
+            vertical: 11,
+          ),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: const BorderSide(color: Color(0xFFD2DCE7)),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: const BorderSide(color: Color(0xFFD2DCE7)),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: const BorderSide(color: Color(0xFF0B4F8A), width: 1.4),
+          ),
+          labelStyle: const TextStyle(color: Color(0xFF4E5E6E)),
+          hintStyle: const TextStyle(color: Color(0xFF8A98A8)),
+        ),
+        navigationBarTheme: NavigationBarThemeData(
+          height: 58,
+          backgroundColor: const Color(0xFFFFFFFF),
+          indicatorColor: const Color(0xFFD9EAF7),
+          labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+          iconTheme: WidgetStateProperty.resolveWith<IconThemeData>((states) {
+            final bool selected = states.contains(WidgetState.selected);
+            return IconThemeData(
+              size: selected ? 22 : 20,
+              color: selected
+                  ? const Color(0xFF0B4F8A)
+                  : const Color(0xFF667788),
+            );
+          }),
+          labelTextStyle: WidgetStateProperty.resolveWith<TextStyle>((states) {
+            if (states.contains(WidgetState.selected)) {
+              return const TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF0B4F8A),
+              );
+            }
+            return const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF667788),
+            );
+          }),
+        ),
+        chipTheme: ChipThemeData(
+          backgroundColor: const Color(0xFFF1F6FB),
+          selectedColor: const Color(0xFFD9EAF7),
+          side: const BorderSide(color: Color(0xFFCAD8E6)),
+          labelStyle: const TextStyle(color: Color(0xFF324456)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+        snackBarTheme: SnackBarThemeData(
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: const Color(0xFF203449),
+          contentTextStyle: const TextStyle(color: Colors.white),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
           ),
         ),
         useMaterial3: true,
@@ -2496,32 +2642,49 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
 
     final double xInterval = _combinedXAxisIntervalSeconds(maxVisibleX);
     final bool isWide = constraints.maxWidth >= 1260;
+    final String selectedWindowLabel = _combinedWindowOptions
+        .firstWhere(
+          (_CombinedWindowOption option) =>
+              option.minutes == _selectedCombinedWindowMinutes,
+          orElse: () => _combinedWindowOptions.first,
+        )
+        .label;
 
     final Widget combinedTimePanel = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        _buildSamplingInfoCard(),
-        const SizedBox(height: 8),
+        _buildSamplingInfoCard(compact: true),
+        const SizedBox(height: 6),
         Row(
           children: <Widget>[
             Text(
               'Hiển thị ${visibleChannels.length}/${_channels.length} kênh',
               style: const TextStyle(
-                fontSize: 12,
+                fontSize: 11,
                 fontWeight: FontWeight.w600,
                 color: Color(0xFF5E6A79),
               ),
             ),
             const Spacer(),
             TextButton(
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              ),
               onPressed: () {
                 setState(() {
                   _hiddenCombinedChannels.clear();
                 });
               },
-              child: const Text('Hiện tất cả'),
+              child: const Text('Hiện tất cả', style: TextStyle(fontSize: 11)),
             ),
             TextButton(
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              ),
               onPressed: () {
                 setState(() {
                   _hiddenCombinedChannels
@@ -2529,11 +2692,11 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                     ..addAll(_channels);
                 });
               },
-              child: const Text('Bỏ tất cả'),
+              child: const Text('Bỏ tất cả', style: TextStyle(fontSize: 11)),
             ),
           ],
         ),
-        const SizedBox(height: 6),
+        const SizedBox(height: 4),
         Expanded(
           child: visibleChannels.isEmpty
               ? const Center(
@@ -2611,13 +2774,13 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                   ),
                 ),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 6),
         Container(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
           decoration: BoxDecoration(
             color: const Color(0xFFF5F8FB),
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(8),
           ),
           child: Wrap(
             spacing: 10,
@@ -2658,60 +2821,153 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       ],
     );
 
-    return Padding(
-      padding: const EdgeInsets.all(12),
-      child: Card(
-        clipBehavior: Clip.antiAlias,
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              // Tab selector row
-              Row(
+    final Widget combinedHeaderPanel = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Container(
+              width: 26,
+              height: 26,
+              decoration: BoxDecoration(
+                color: const Color(0xFFD9EAF7),
+                borderRadius: BorderRadius.circular(7),
+              ),
+              child: const Icon(
+                Icons.multiline_chart,
+                size: 15,
+                color: Color(0xFF0B4F8A),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
                   Text(
                     'Kênh tổng hợp',
                     style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w700,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 17,
+                    ),
+                  ),
+                  Text(
+                    'Giám sát đồng thời ${visibleChannels.length} kênh đang hiển thị',
+                    style: const TextStyle(
+                      fontSize: 10.5,
+                      color: Color(0xFF5E6A79),
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 6),
-              Wrap(
-                spacing: 8,
-                runSpacing: 6,
-                children: _combinedWindowOptions.map((
-                  _CombinedWindowOption option,
-                ) {
-                  final bool selected =
-                      _selectedCombinedWindowMinutes == option.minutes;
-                  return ChoiceChip(
-                    label: Text(option.label),
-                    selected: selected,
-                    onSelected: (_) {
-                      setState(() {
-                        _selectedCombinedWindowMinutes = option.minutes;
-                      });
-                    },
-                  );
-                }).toList(),
-              ),
-              const SizedBox(height: 6),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 6,
+          runSpacing: 6,
+          children: <Widget>[
+            _dashboardInfoPill(
+              icon: Icons.history,
+              label: 'Cửa sổ',
+              value: selectedWindowLabel,
+            ),
+            _dashboardInfoPill(
+              icon: Icons.tune,
+              label: 'Dải đo',
+              value:
+                  '${_chartMinG.toStringAsFixed(2)}..${_chartMaxG.toStringAsFixed(2)} g',
+            ),
+            _dashboardInfoPill(
+              icon: Icons.warning_amber_rounded,
+              label: 'Ngưỡng',
+              value:
+                  '${_warningThreshold.toStringAsFixed(2)}/${_dangerThreshold.toStringAsFixed(2)} g',
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF5F8FC),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFD8E3EE)),
+          ),
+          child: Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: _combinedWindowOptions.map((
+              _CombinedWindowOption option,
+            ) {
+              final bool selected =
+                  _selectedCombinedWindowMinutes == option.minutes;
+              return ChoiceChip(
+                visualDensity: VisualDensity.compact,
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                labelPadding: const EdgeInsets.symmetric(horizontal: 8),
+                label: Text(option.label),
+                selected: selected,
+                onSelected: (_) {
+                  setState(() {
+                    _selectedCombinedWindowMinutes = option.minutes;
+                  });
+                },
+              );
+            }).toList(),
+          ),
+        ),
+      ],
+    );
+
+    return Padding(
+      padding: const EdgeInsets.all(10),
+      child: Card(
+        clipBehavior: Clip.antiAlias,
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              if (!isWide) ...<Widget>[
+                combinedHeaderPanel,
+                const SizedBox(height: 4),
+              ],
               Expanded(
                 child: isWide
                     ? Row(
                         children: <Widget>[
-                          Expanded(flex: 7, child: combinedTimePanel),
+                          Expanded(
+                            flex: 7,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: <Widget>[
+                                combinedHeaderPanel,
+                                const SizedBox(height: 6),
+                                Expanded(child: combinedTimePanel),
+                              ],
+                            ),
+                          ),
                           const SizedBox(width: 10),
                           Expanded(
                             flex: 5,
                             child: Column(
                               children: <Widget>[
-                                Expanded(child: _buildFftPanel(compact: true)),
+                                Expanded(
+                                  child: _panelShell(
+                                    title: 'FFT phổ tần',
+                                    child: _buildFftPanel(compact: true),
+                                  ),
+                                ),
                                 const SizedBox(height: 10),
-                                Expanded(child: _buildWavePanel(compact: true)),
+                                Expanded(
+                                  child: _panelShell(
+                                    title: 'Dạng sóng',
+                                    child: _buildWavePanel(compact: true),
+                                  ),
+                                ),
                               ],
                             ),
                           ),
@@ -2723,12 +2979,18 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                           const SizedBox(height: 10),
                           Expanded(
                             flex: 3,
-                            child: _buildFftPanel(compact: true),
+                            child: _panelShell(
+                              title: 'FFT phổ tần',
+                              child: _buildFftPanel(compact: true),
+                            ),
                           ),
                           const SizedBox(height: 10),
                           Expanded(
                             flex: 3,
-                            child: _buildWavePanel(compact: true),
+                            child: _panelShell(
+                              title: 'Dạng sóng',
+                              child: _buildWavePanel(compact: true),
+                            ),
                           ),
                         ],
                       ),
@@ -2736,6 +2998,74 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _dashboardInfoPill({
+    required IconData icon,
+    required String label,
+    required String value,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF4F8FC),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFD8E3EE)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(icon, size: 12, color: const Color(0xFF0B4F8A)),
+          const SizedBox(width: 5),
+          Text(
+            '$label: ',
+            style: const TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF466079),
+            ),
+          ),
+          Text(
+            value,
+            style: const TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF22384D),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _panelShell({required String title, required Widget child}) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(8, 8, 8, 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFAFCFF),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFDCE6F1)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Text(
+              title,
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF2A3E53),
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Expanded(child: child),
+        ],
       ),
     );
   }
@@ -3217,7 +3547,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     );
   }
 
-  Widget _buildSamplingInfoCard() {
+  Widget _buildSamplingInfoCard({bool compact = false}) {
     final String actualSamplingLabel = _useBridge
         ? (_isConnected &&
                   _actualSampleRateHz != null &&
@@ -3228,33 +3558,40 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
 
     return Card(
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        padding: EdgeInsets.symmetric(
+          horizontal: compact ? 10 : 12,
+          vertical: compact ? 6 : 9,
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             Row(
               children: <Widget>[
-                const Icon(Icons.speed, size: 18, color: Color(0xFF005A9C)),
-                const SizedBox(width: 8),
+                Icon(
+                  Icons.speed,
+                  size: compact ? 15 : 18,
+                  color: const Color(0xFF005A9C),
+                ),
+                SizedBox(width: compact ? 6 : 8),
                 Expanded(
                   child: Text(
                     'Cấu hình: $_sampleRateHz Hz | $_samplesPerRead mẫu/lần đọc',
-                    style: const TextStyle(
-                      fontSize: 12,
+                    style: TextStyle(
+                      fontSize: compact ? 11 : 12,
                       fontWeight: FontWeight.w700,
-                      color: Color(0xFF2F3B4A),
+                      color: const Color(0xFF2F3B4A),
                     ),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 4),
+            SizedBox(height: compact ? 2 : 4),
             Text(
               actualSamplingLabel,
-              style: const TextStyle(
-                fontSize: 11.5,
+              style: TextStyle(
+                fontSize: compact ? 10.5 : 11.5,
                 fontWeight: FontWeight.w500,
-                color: Color(0xFF5E6A79),
+                color: const Color(0xFF5E6A79),
               ),
             ),
           ],
