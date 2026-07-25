@@ -1570,14 +1570,17 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   ) {
     final List<FlSpot> source = _history[channel]!;
     if (source.isEmpty) {
-      return <FlSpot>[FlSpot(0, _chartMinG), FlSpot(1, _chartMinG)];
+      final double nowSec = frameNowMs / 1000.0;
+      return <FlSpot>[
+        FlSpot(nowSec - 1, _chartMinG),
+        FlSpot(nowSec, _chartMinG),
+      ];
     }
 
     final DateTime now = DateTime.fromMillisecondsSinceEpoch(
       frameNowMs.toInt(),
     );
     List<FlSpot> visible = source;
-    double baseMs;
     double? cutoffMs;
 
     if (selectedWindowMinutes == -1) {
@@ -1592,7 +1595,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       if (visible.isEmpty) {
         visible = <FlSpot>[FlSpot(realtimeCutoffMs, source.last.y)];
       }
-      baseMs = realtimeCutoffMs;
     } else if (selectedWindowMinutes > 0) {
       final double windowCutoffMs = now
           .subtract(Duration(minutes: selectedWindowMinutes))
@@ -1605,9 +1607,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       if (visible.isEmpty) {
         visible = <FlSpot>[FlSpot(windowCutoffMs, source.last.y)];
       }
-      baseMs = windowCutoffMs;
-    } else {
-      baseMs = visible.first.x;
     }
 
     if (cutoffMs != null) {
@@ -1624,19 +1623,16 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       }
     }
 
-    final List<FlSpot> rebased = visible
-        .map(
-          (FlSpot spot) =>
-              FlSpot((spot.x - baseMs) / 1000, _clampYForChart(spot.y)),
-        )
+    final List<FlSpot> absolute = visible
+        .map((FlSpot spot) => FlSpot(spot.x / 1000, _clampYForChart(spot.y)))
         .toList();
 
-    if (rebased.length == 1) {
-      final FlSpot only = rebased.first;
+    if (absolute.length == 1) {
+      final FlSpot only = absolute.first;
       return <FlSpot>[only, FlSpot(only.x + 1, only.y)];
     }
 
-    return rebased;
+    return absolute;
   }
 
   double? _combinedFixedWindowSeconds() {
@@ -1701,22 +1697,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     return value.clamp(minSafe, maxSafe).toDouble();
   }
 
-  String _formatRelativeTimeLabel(double seconds) {
-    final int totalSeconds = seconds.round().clamp(0, 86400);
-    final int hours = totalSeconds ~/ 3600;
-    final int minutes = (totalSeconds % 3600) ~/ 60;
-    final int secs = totalSeconds % 60;
-
-    if (hours > 0) {
-      return '${hours}h${minutes.toString().padLeft(2, '0')}';
-    }
-    if (minutes > 0) {
-      return '${minutes}m';
-    }
-    return '${secs}s';
-  }
-
-  double _combinedXAxisIntervalSeconds(double maxVisibleX) {
+  double _combinedXAxisIntervalSeconds(double visibleSpanSeconds) {
     switch (_selectedCombinedWindowMinutes) {
       case -1:
         return 10;
@@ -1731,17 +1712,20 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       case 240:
         return 60 * 60;
       case 0:
-        return max(maxVisibleX / 5, 1);
+        return max(visibleSpanSeconds / 5, 1);
       default:
-        return max(maxVisibleX / 4, 1);
+        return max(visibleSpanSeconds / 4, 1);
     }
   }
 
-  Widget _buildCombinedBottomTitle(
-    double value,
-    TitleMeta meta,
-    double maxVisibleX,
-  ) {
+  String _formatSystemTimeLabel(double secondsSinceEpoch) {
+    final DateTime time = DateTime.fromMillisecondsSinceEpoch(
+      (secondsSinceEpoch * 1000).round(),
+    ).toLocal();
+    return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}:${time.second.toString().padLeft(2, '0')}';
+  }
+
+  Widget _buildCombinedBottomTitle(double value, TitleMeta meta) {
     const TextStyle style = TextStyle(
       fontSize: 10,
       color: Color(0xFF5E6A79),
@@ -1749,23 +1733,12 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     );
 
     final bool isStart = (value - meta.min).abs() < 0.5;
-    final bool isEnd = (value - maxVisibleX).abs() < 0.5;
-    String label = '';
-
-    if (isStart) {
-      if (_selectedCombinedWindowMinutes == -1) {
-        label = '-${_combinedRealtimeSeconds}s';
-      } else {
-        label = _selectedCombinedWindowMinutes == 0
-            ? 'Bắt đầu'
-            : '-${_selectedCombinedWindowMinutes}m';
-      }
-    } else if (isEnd) {
-      label = _selectedCombinedWindowMinutes == -1 ? 'Trực tiếp' : 'Hiện tại';
-    } else {
-      final double remaining = (maxVisibleX - value).clamp(0, maxVisibleX);
-      label = '-${_formatRelativeTimeLabel(remaining)}';
+    final bool isEnd = (value - meta.max).abs() < 0.5;
+    if (isStart || isEnd) {
+      return const SizedBox.shrink();
     }
+
+    final String label = _formatSystemTimeLabel(value);
 
     return SideTitleWidget(
       axisSide: meta.axisSide,
@@ -2774,8 +2747,12 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         .where(_isCombinedChannelVisible)
         .toList();
     final double frameNowMs = DateTime.now().millisecondsSinceEpoch.toDouble();
+    final double frameNowSec = frameNowMs / 1000.0;
     final double? fixedWindowSeconds = _combinedFixedWindowSeconds();
-    double maxVisibleX = fixedWindowSeconds ?? 1;
+    double minVisibleX = fixedWindowSeconds != null
+        ? frameNowSec - fixedWindowSeconds
+        : frameNowSec;
+    double maxVisibleX = frameNowSec;
 
     for (final String channel in visibleChannels) {
       final List<FlSpot> safeSpots = _visibleSpotsForCombinedChart(
@@ -2784,6 +2761,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         frameNowMs,
       );
       if (fixedWindowSeconds == null) {
+        minVisibleX = min(minVisibleX, safeSpots.first.x);
         maxVisibleX = max(maxVisibleX, safeSpots.last.x);
       }
 
@@ -2801,7 +2779,8 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       );
     }
 
-    final double xInterval = _combinedXAxisIntervalSeconds(maxVisibleX);
+    final double visibleSpanSeconds = max(maxVisibleX - minVisibleX, 1);
+    final double xInterval = _combinedXAxisIntervalSeconds(visibleSpanSeconds);
     final bool isWide = constraints.maxWidth >= 1260;
     final String selectedWindowLabel = _combinedWindowOptions
         .firstWhere(
@@ -2874,7 +2853,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                   duration: Duration.zero,
                   curve: Curves.linear,
                   LineChartData(
-                    minX: 0,
+                    minX: minVisibleX,
                     maxX: maxVisibleX,
                     minY: _chartMinG,
                     maxY: _chartMaxG,
@@ -2882,10 +2861,14 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                     lineTouchData: const LineTouchData(enabled: false),
                     gridData: FlGridData(
                       show: true,
-                      drawVerticalLine: false,
+                      drawVerticalLine: true,
                       horizontalInterval: max(chartRange / 6, 0.05),
                       getDrawingHorizontalLine: (_) => FlLine(
                         color: const Color(0xFFE8EDF3),
+                        strokeWidth: 1,
+                      ),
+                      getDrawingVerticalLine: (_) => const FlLine(
+                        color: Color(0xFFE8EDF3),
                         strokeWidth: 1,
                       ),
                     ),
@@ -2916,16 +2899,16 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                         sideTitles: SideTitles(showTitles: false),
                       ),
                       bottomTitles: AxisTitles(
+                        axisNameWidget: const Text(
+                          'Thời gian hệ thống',
+                          style: TextStyle(fontSize: 10),
+                        ),
                         sideTitles: SideTitles(
                           showTitles: true,
                           reservedSize: 22,
                           interval: xInterval,
                           getTitlesWidget: (double value, TitleMeta meta) {
-                            return _buildCombinedBottomTitle(
-                              value,
-                              meta,
-                              maxVisibleX,
-                            );
+                            return _buildCombinedBottomTitle(value, meta);
                           },
                         ),
                       ),

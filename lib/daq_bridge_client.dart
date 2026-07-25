@@ -127,10 +127,10 @@ class DaqBridgeClient {
     if (Platform.isWindows) {
       await _ensureNativeEventSubscription();
       try {
-        await _nativeMethodChannel.invokeMethod<void>('startBridge', <String, Object?>{
-          'executablePath': executablePath,
-          'args': args,
-        });
+        await _nativeMethodChannel.invokeMethod<void>(
+          'startBridge',
+          <String, Object?>{'executablePath': executablePath, 'args': args},
+        );
         _nativeRunning = true;
         _emitStatus('Bridge started (in-process Windows NI-DAQmx)');
       } catch (error) {
