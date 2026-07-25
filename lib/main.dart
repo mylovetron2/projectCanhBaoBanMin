@@ -27,6 +27,19 @@ class MyApp extends StatelessWidget {
           brightness: Brightness.light,
         ),
         scaffoldBackgroundColor: const Color(0xFFF5F8FB),
+        appBarTheme: const AppBarTheme(
+          titleTextStyle: TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.w700,
+            color: Color(0xFF1A2530),
+            fontFamilyFallback: <String>[
+              'Segoe UI',
+              'Arial',
+              'Noto Sans',
+              'sans-serif',
+            ],
+          ),
+        ),
         useMaterial3: true,
       ),
       home: const MineAlertDashboard(),
@@ -175,13 +188,13 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   ];
   static const List<_CombinedWindowOption> _combinedWindowOptions =
       <_CombinedWindowOption>[
-        _CombinedWindowOption(label: 'Realtime', minutes: -1),
+        _CombinedWindowOption(label: 'Thời gian thực', minutes: -1),
         _CombinedWindowOption(label: '15p', minutes: 15),
         _CombinedWindowOption(label: '30p', minutes: 30),
         _CombinedWindowOption(label: '1h', minutes: 60),
         _CombinedWindowOption(label: '2h', minutes: 120),
         _CombinedWindowOption(label: '4h', minutes: 240),
-        _CombinedWindowOption(label: 'All', minutes: 0),
+        _CombinedWindowOption(label: 'Tất cả', minutes: 0),
       ];
   static const List<Color> _channelPalette = <Color>[
     Color(0xFF1F77B4),
@@ -436,6 +449,66 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     return int.tryParse(match.group(1)!);
   }
 
+  double? _extractDoubleFlagFromArgs(String args, String flag) {
+    final RegExp pattern = RegExp(
+      '${RegExp.escape(flag)}\\s+(-?\\d+(?:\\.\\d+)?)',
+    );
+    final Match? match = pattern.firstMatch(args);
+    if (match == null) {
+      return null;
+    }
+    return double.tryParse(match.group(1)!);
+  }
+
+  void _applyBridgePreset(String args, String label) {
+    setState(() {
+      _bridgeArguments = args.trim();
+      _bridgeArgsController.text = _bridgeArguments;
+      _aiChannelMode = _extractAiModeFromArgs(_bridgeArguments);
+
+      final int? parsedRate = _extractIntFlagFromArgs(
+        _bridgeArguments,
+        '--rate',
+      );
+      final int? parsedSamples = _extractIntFlagFromArgs(
+        _bridgeArguments,
+        '--samples',
+      );
+      final double? parsedMin = _extractDoubleFlagFromArgs(
+        _bridgeArguments,
+        '--min',
+      );
+      final double? parsedMax = _extractDoubleFlagFromArgs(
+        _bridgeArguments,
+        '--max',
+      );
+
+      if (parsedRate != null && parsedRate > 0) {
+        _sampleRateHz = parsedRate;
+        _sampleRateController.text = parsedRate.toString();
+      }
+      if (parsedSamples != null && parsedSamples > 0) {
+        _samplesPerRead = parsedSamples;
+        _samplesPerReadController.text = parsedSamples.toString();
+      }
+      if (parsedMin != null && parsedMax != null && parsedMin < parsedMax) {
+        _voltageMin = parsedMin;
+        _voltageMax = parsedMax;
+        _voltageMinController.text = parsedMin.toString();
+        _voltageMaxController.text = parsedMax.toString();
+      }
+
+      _eventLogs.insert(
+        0,
+        '[${DateTime.now().toLocal()}] Applied bridge preset: $label',
+      );
+      _trimLogs();
+    });
+
+    _syncAcquisitionSignalUnit();
+    unawaited(_saveSettings());
+  }
+
   _AccelSensorPreset _selectedAccelPreset() {
     return _accelPresets.firstWhere(
       (_AccelSensorPreset preset) => preset.id == _selectedAccelPresetId,
@@ -545,19 +618,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     } finally {
       _autoRecoveringAccelUnsupported = false;
     }
-  }
-
-  void _resetAutoFallbackStatus() {
-    setState(() {
-      _lastAutoFallbackAt = null;
-      _lastAutoFallbackReason = '';
-      _eventLogs.insert(
-        0,
-        '[${DateTime.now().toLocal()}] Auto fallback status cleared by user.',
-      );
-      _trimLogs();
-    });
-    unawaited(_saveSettings());
   }
 
   BridgeAiChannelMode _parseAiChannelMode(String? raw) {
@@ -912,7 +972,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       _acquisitionService.setRunning(_isRunning);
       _eventLogs.insert(
         0,
-        '[${DateTime.now().toLocal()}] Acquisition ${_isRunning ? 'started' : 'paused'}',
+        '[${DateTime.now().toLocal()}] Thu nhận ${_isRunning ? 'bắt đầu' : 'tạm dừng'}',
       );
     });
   }
@@ -931,24 +991,24 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       context: context,
       builder: (BuildContext dialogContext) {
         return AlertDialog(
-          title: const Text('Disconnect data source?'),
+          title: const Text('Ngắt kết nối nguồn dữ liệu?'),
           content: Text(
             _useBridge
-                ? 'Stop the NI-DAQmx bridge process and disconnect now?'
-                : 'Disconnect demo link now?',
+                ? 'Dừng tiến trình bridge NI-DAQmx và ngắt kết nối ngay bây giờ?'
+                : 'Ngắt kết nối demo ngay bây giờ?',
           ),
           actions: <Widget>[
             TextButton(
               onPressed: () {
                 Navigator.of(dialogContext).pop(false);
               },
-              child: const Text('Cancel'),
+              child: const Text('Hủy'),
             ),
             FilledButton(
               onPressed: () {
                 Navigator.of(dialogContext).pop(true);
               },
-              child: const Text('Disconnect'),
+              child: const Text('Ngắt kết nối'),
             ),
           ],
         );
@@ -958,7 +1018,9 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     return confirmed ?? false;
   }
 
-  Future<void> _connectConnection({String trigger = 'user action'}) async {
+  Future<void> _connectConnection({
+    String trigger = 'thao tác người dùng',
+  }) async {
     if (!_useBridge) {
       setState(() {
         _isConnected = true;
@@ -967,11 +1029,11 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         _acquisitionService.setMockConnected(true);
         _eventLogs.insert(
           0,
-          '[${DateTime.now().toLocal()}] Demo link connected ($trigger)',
+          '[${DateTime.now().toLocal()}] Đã kết nối demo ($trigger)',
         );
         _trimLogs();
       });
-      _showActionMessage('Demo connected.');
+      _showActionMessage('Đã kết nối demo.');
       return;
     }
 
@@ -990,12 +1052,12 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         setState(() {
           _eventLogs.insert(
             0,
-            '[${DateTime.now().toLocal()}] Bridge executable path is empty. Stay in demo mode or set a valid path.',
+            '[${DateTime.now().toLocal()}] Đường dẫn bridge trống. Hãy giữ chế độ demo hoặc đặt đường dẫn hợp lệ.',
           );
           _isConnected = false;
           _trimLogs();
         });
-        _showActionMessage('Bridge executable path is empty.');
+        _showActionMessage('Đường dẫn bridge đang trống.');
         return;
       }
 
@@ -1026,11 +1088,11 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         _isConnected = _acquisitionService.isBridgeRunning;
         _eventLogs.insert(
           0,
-          '[${DateTime.now().toLocal()}] Bridge connected ($trigger)',
+          '[${DateTime.now().toLocal()}] Đã kết nối bridge ($trigger)',
         );
         _trimLogs();
       });
-      _showActionMessage('Bridge connected.');
+      _showActionMessage('Đã kết nối bridge.');
     } catch (error) {
       if (!mounted) {
         return;
@@ -1041,15 +1103,17 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         _actualSamplesPerRead = null;
         _eventLogs.insert(
           0,
-          '[${DateTime.now().toLocal()}] Bridge connect failed: $error',
+          '[${DateTime.now().toLocal()}] Kết nối bridge thất bại: $error',
         );
         _trimLogs();
       });
-      _showActionMessage('Bridge connect failed.');
+      _showActionMessage('Kết nối bridge thất bại.');
     }
   }
 
-  Future<void> _disconnectConnection({String reason = 'user action'}) async {
+  Future<void> _disconnectConnection({
+    String reason = 'thao tác người dùng',
+  }) async {
     if (!_useBridge) {
       setState(() {
         _isConnected = false;
@@ -1058,11 +1122,11 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         _acquisitionService.setMockConnected(false);
         _eventLogs.insert(
           0,
-          '[${DateTime.now().toLocal()}] Demo link disconnected ($reason)',
+          '[${DateTime.now().toLocal()}] Đã ngắt kết nối demo ($reason)',
         );
         _trimLogs();
       });
-      _showActionMessage('Demo disconnected. Reason: $reason');
+      _showActionMessage('Đã ngắt kết nối demo. Lý do: $reason');
       return;
     }
 
@@ -1076,11 +1140,11 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         _actualSamplesPerRead = null;
         _eventLogs.insert(
           0,
-          '[${DateTime.now().toLocal()}] Bridge already disconnected ($reason)',
+          '[${DateTime.now().toLocal()}] Bridge đã ngắt trước đó ($reason)',
         );
         _trimLogs();
       });
-      _showActionMessage('Bridge already disconnected.');
+      _showActionMessage('Bridge đã ngắt trước đó.');
       return;
     }
 
@@ -1094,24 +1158,26 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       _actualSamplesPerRead = null;
       _eventLogs.insert(
         0,
-        '[${DateTime.now().toLocal()}] Bridge disconnected ($reason)',
+        '[${DateTime.now().toLocal()}] Đã ngắt kết nối bridge ($reason)',
       );
       _trimLogs();
     });
-    _showActionMessage('Bridge disconnected. Reason: $reason');
+    _showActionMessage('Đã ngắt kết nối bridge. Lý do: $reason');
   }
 
   Future<void> _toggleConnection() async {
     if (_isConnected) {
       final bool shouldDisconnect = await _confirmDisconnectConnection();
       if (!shouldDisconnect) {
-        _showActionMessage('Disconnect canceled.');
+        _showActionMessage('Đã hủy thao tác ngắt kết nối.');
         return;
       }
-      await _disconnectConnection(reason: 'toolbar toggle');
+      await _disconnectConnection(
+        reason: 'chuyển trạng thái trên thanh công cụ',
+      );
       return;
     }
-    await _connectConnection(trigger: 'toolbar toggle');
+    await _connectConnection(trigger: 'chuyển trạng thái trên thanh công cụ');
   }
 
   List<String> _splitArguments(String raw) {
@@ -1128,7 +1194,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     }
 
     if (!enabled && _acquisitionService.isBridgeRunning) {
-      await _disconnectConnection(reason: 'switched to demo source');
+      await _disconnectConnection(reason: 'chuyển sang nguồn demo');
     }
 
     if (!mounted) {
@@ -1148,13 +1214,13 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       _isConnected = enabled ? _acquisitionService.isBridgeRunning : true;
       _eventLogs.insert(
         0,
-        '[${DateTime.now().toLocal()}] Data source: ${enabled ? 'NI-DAQmx bridge (multi-channel)' : 'Demo'}',
+        '[${DateTime.now().toLocal()}] Nguồn dữ liệu: ${enabled ? 'NI-DAQmx bridge (đa kênh)' : 'Demo'}',
       );
     });
     unawaited(_saveSettings());
 
     if (enabled) {
-      await _connectConnection(trigger: 'switched to bridge source');
+      await _connectConnection(trigger: 'chuyển sang nguồn bridge');
     }
   }
 
@@ -1432,7 +1498,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
             : '-${_selectedCombinedWindowMinutes}m';
       }
     } else if (isEnd) {
-      label = _selectedCombinedWindowMinutes == -1 ? 'Live' : 'Hiện tại';
+      label = _selectedCombinedWindowMinutes == -1 ? 'Trực tiếp' : 'Hiện tại';
     } else {
       final double remaining = (maxVisibleX - value).clamp(0, maxVisibleX);
       label = '-${_formatRelativeTimeLabel(remaining)}';
@@ -1501,27 +1567,16 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
 
   @override
   Widget build(BuildContext context) {
-    final int warningCount = _lastStates.values
-        .where((s) => s == SensorState.warning)
-        .length;
-    final int dangerCount = _lastStates.values
-        .where((s) => s == SensorState.danger)
-        .length;
-    final int normalCount = _lastStates.length - warningCount - dangerCount;
-    final double maxSignal = _latestValues.values.isEmpty
-        ? 0
-        : _latestValues.values.reduce(max);
-    final double ai9RawRms = _latestRawRmsVolts['AI9'] ?? 0;
     final String screenTitle = switch (_selectedScreenIndex) {
-      0 => 'Cảnh báo bắn mìn - Địa vật lý Giếng Khoang',
-      1 => 'Combined Channels',
-      2 => 'System Panels',
-      _ => 'Settings',
+      0 => 'Kênh tổng hợp',
+      1 => 'Kênh cảm biến',
+      2 => 'Log data',
+      _ => 'Cài đặt',
     };
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(screenTitle),
+        title: Text(screenTitle, maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: <Widget>[
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -1530,7 +1585,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                 FilledButton.tonalIcon(
                   onPressed: _toggleRun,
                   icon: Icon(_isRunning ? Icons.pause : Icons.play_arrow),
-                  label: Text(_isRunning ? 'Running' : 'Paused'),
+                  label: Text(_isRunning ? 'Đang chạy' : 'Tạm dừng'),
                 ),
                 const SizedBox(width: 8),
                 FilledButton.tonalIcon(
@@ -1538,7 +1593,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                     unawaited(_toggleDataSource(!_useBridge));
                   },
                   icon: const Icon(Icons.swap_horiz),
-                  label: Text(_useBridge ? 'Bridge Source' : 'Demo Source'),
+                  label: Text(_useBridge ? 'Nguồn bridge' : 'Nguồn demo'),
                 ),
                 const SizedBox(width: 8),
                 FilledButton.tonalIcon(
@@ -1546,8 +1601,10 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                   icon: Icon(_isConnected ? Icons.link : Icons.link_off),
                   label: Text(
                     _useBridge
-                        ? (_isConnected ? 'Bridge Connected' : 'Bridge Disconnected')
-                        : (_isConnected ? 'Demo Connected' : 'Demo Disconnected'),
+                        ? (_isConnected
+                              ? 'Bridge đã kết nối'
+                              : 'Bridge đã ngắt')
+                        : (_isConnected ? 'Demo đã kết nối' : 'Demo đã ngắt'),
                   ),
                 ),
               ],
@@ -1558,22 +1615,15 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       body: LayoutBuilder(
         builder: (BuildContext context, BoxConstraints constraints) {
           if (_selectedScreenIndex == 0) {
-            return _buildMonitoringScreen(constraints);
-          }
-
-          if (_selectedScreenIndex == 1) {
             return _buildCombinedChartScreen(constraints);
           }
 
+          if (_selectedScreenIndex == 1) {
+            return _buildMonitoringScreen(constraints);
+          }
+
           if (_selectedScreenIndex == 2) {
-            return _buildPanelsScreen(
-              constraints,
-              normalCount,
-              warningCount,
-              dangerCount,
-              maxSignal,
-              ai9RawRms,
-            );
+            return _buildPanelsScreen(constraints);
           }
 
           return _buildSettingsScreen();
@@ -1588,15 +1638,15 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         },
         destinations: const <NavigationDestination>[
           NavigationDestination(
-            icon: Icon(Icons.show_chart),
-            label: 'Channels',
+            icon: Icon(Icons.multiline_chart),
+            label: 'Tổng hợp',
           ),
           NavigationDestination(
-            icon: Icon(Icons.multiline_chart),
-            label: 'Combined',
+            icon: Icon(Icons.show_chart),
+            label: 'Kênh cảm biến',
           ),
-          NavigationDestination(icon: Icon(Icons.tune), label: 'Panels'),
-          NavigationDestination(icon: Icon(Icons.settings), label: 'Settings'),
+          NavigationDestination(icon: Icon(Icons.tune), label: 'Log data'),
+          NavigationDestination(icon: Icon(Icons.settings), label: 'Cài đặt'),
         ],
       ),
     );
@@ -1694,72 +1744,23 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     );
   }
 
-  Widget _buildPanelsScreen(
-    BoxConstraints constraints,
-    int normalCount,
-    int warningCount,
-    int dangerCount,
-    double maxSignal,
-    double ai9RawRms,
-  ) {
-    final bool isWide = constraints.maxWidth >= 1120;
-
-    final Widget leftColumn = ListView(
-      children: <Widget>[
-        _buildControlPanel(),
-        const SizedBox(height: 12),
-        _buildVoltageRangePanel(),
-        const SizedBox(height: 12),
-        _buildSummaryPanel(
-          normalCount,
-          warningCount,
-          dangerCount,
-          maxSignal,
-          ai9RawRms,
-        ),
-      ],
-    );
-
-    final Widget rightColumn = Column(
-      children: <Widget>[
-        _buildPipelinePanel(),
-        const SizedBox(height: 12),
-        Expanded(child: _buildEventPanel()),
-      ],
-    );
-
-    if (isWide) {
-      return Padding(
-        padding: const EdgeInsets.all(16),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Expanded(flex: 3, child: leftColumn),
-            const SizedBox(width: 16),
-            Expanded(flex: 2, child: rightColumn),
-          ],
-        ),
-      );
-    }
+  Widget _buildPanelsScreen(BoxConstraints constraints) {
+    final double horizontalPadding = constraints.maxWidth >= 1120 ? 16 : 12;
 
     return Padding(
-      padding: const EdgeInsets.all(12),
-      child: ListView(
-        children: <Widget>[
-          _buildControlPanel(),
-          const SizedBox(height: 12),
-          _buildSummaryPanel(
-            normalCount,
-            warningCount,
-            dangerCount,
-            maxSignal,
-            ai9RawRms,
+      padding: EdgeInsets.all(horizontalPadding),
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 980),
+          child: ListView(
+            children: <Widget>[
+              _buildPipelinePanel(),
+              const SizedBox(height: 12),
+              SizedBox(height: 360, child: _buildEventPanel()),
+            ],
           ),
-          const SizedBox(height: 12),
-          _buildPipelinePanel(),
-          const SizedBox(height: 12),
-          SizedBox(height: 360, child: _buildEventPanel()),
-        ],
+        ),
       ),
     );
   }
@@ -1918,9 +1919,9 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         mags.length,
         (int k) => (k + 1) * srHz / fftN,
       );
-        sourceLabel = _useBridge
-          ? 'Bridge FFT (hardware)'
-          : 'Demo FFT (10kHz block simulation)';
+      sourceLabel = _useBridge
+          ? 'FFT bridge (phần cứng)'
+          : 'FFT demo (mô phỏng block 10kHz)';
     } else {
       final ({
         List<double> freqs,
@@ -1933,7 +1934,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       mags = r.mags;
       srHz = r.sampleRateHz;
       samplesUsed = r.samplesUsed;
-      sourceLabel = 'Dart FFT (demo / RMS envelope)';
+      sourceLabel = 'Dart FFT (demo / vỏ bao RMS)';
     }
 
     final double peakMag = mags.isEmpty ? 0.0 : mags.reduce(max);
@@ -1998,7 +1999,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
               runSpacing: 4,
               children: <Widget>[
                 Text(
-                  'DBG FFT ${hasFrameFft ? (_useBridge ? 'bridge' : 'demo-frame') : 'demo-fallback'}',
+                  'THÔNG TIN FFT ${hasFrameFft ? (_useBridge ? 'bridge' : 'khung-demo') : 'demo-du-phong'}',
                   style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
@@ -2013,7 +2014,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                   ),
                 ),
                 Text(
-                  'Bins=${mags.length}',
+                  'Số bin=${mags.length}',
                   style: const TextStyle(
                     fontSize: 11,
                     color: Color(0xFF4B5B6B),
@@ -2027,14 +2028,14 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                   ),
                 ),
                 Text(
-                  'Min=${minMag.toStringAsFixed(4)}',
+                  'Nhỏ nhất=${minMag.toStringAsFixed(4)}',
                   style: const TextStyle(
                     fontSize: 11,
                     color: Color(0xFF4B5B6B),
                   ),
                 ),
                 Text(
-                  'Max=${peakMag.toStringAsFixed(4)}',
+                  'Lớn nhất=${peakMag.toStringAsFixed(4)}',
                   style: const TextStyle(
                     fontSize: 11,
                     color: Color(0xFF4B5B6B),
@@ -2278,7 +2279,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                     });
                   },
                   icon: const Icon(Icons.auto_awesome, size: 14),
-                  label: const Text('Auto', style: TextStyle(fontSize: 11)),
+                  label: const Text('Tự động', style: TextStyle(fontSize: 11)),
                   style: ElevatedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 8,
@@ -2293,10 +2294,10 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         const SizedBox(height: 8),
         if (hasData)
           Text(
-            'Oscilloscope (${hasFrameData ? 'bridge' : 'demo'})  |  N=$outCount  |  Fs: ${effectiveFsHz.toStringAsFixed(1)} Hz'
-            '  |  Block: ${blockMs.toStringAsFixed(1)} ms'
-            '  |  Window: ${displayTimeWindowMs.toStringAsFixed(1)} ms'
-            '${hasFrameData ? '  |  Decim: ×$_bridgeWaveDecimStep' : ''}',
+            'Dạng sóng (${hasFrameData ? 'bridge' : 'demo'})  |  N=$outCount  |  Fs: ${effectiveFsHz.toStringAsFixed(1)} Hz'
+            '  |  Khối: ${blockMs.toStringAsFixed(1)} ms'
+            '  |  Cửa sổ: ${displayTimeWindowMs.toStringAsFixed(1)} ms'
+            '${hasFrameData ? '  |  Giảm mẫu: ×$_bridgeWaveDecimStep' : ''}',
             style: const TextStyle(fontSize: 11, color: Color(0xFF5E6A79)),
           ),
         if (!compact) ...<Widget>[
@@ -2314,7 +2315,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
               runSpacing: 4,
               children: <Widget>[
                 Text(
-                  'DBG WAVE ${waveInVoltage ? 'bridge' : 'demo'}',
+                  'THÔNG TIN SÓNG ${waveInVoltage ? 'bridge' : 'demo'}',
                   style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
@@ -2336,14 +2337,14 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                   ),
                 ),
                 Text(
-                  'Min=${minSample.toStringAsFixed(4)} $valueUnit',
+                  'Nhỏ nhất=${minSample.toStringAsFixed(4)} $valueUnit',
                   style: const TextStyle(
                     fontSize: 11,
                     color: Color(0xFF4B5B6B),
                   ),
                 ),
                 Text(
-                  'Max=${maxSample.toStringAsFixed(4)} $valueUnit',
+                  'Lớn nhất=${maxSample.toStringAsFixed(4)} $valueUnit',
                   style: const TextStyle(
                     fontSize: 11,
                     color: Color(0xFF4B5B6B),
@@ -2670,7 +2671,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
               Row(
                 children: <Widget>[
                   Text(
-                    'Combined Channels',
+                    'Kênh tổng hợp',
                     style: Theme.of(context).textTheme.titleMedium?.copyWith(
                       fontWeight: FontWeight.w700,
                     ),
@@ -2743,300 +2744,476 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     return ListView(
       padding: const EdgeInsets.all(12),
       children: <Widget>[
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+        _buildSettingsSectionCard(
+          icon: Icons.settings_input_component,
+          title: 'Đầu vào DAQ',
+          children: <Widget>[
+            Row(
               children: <Widget>[
-                const Text(
-                  'DAQ Settings',
-                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: <Widget>[
-                    Expanded(
-                      child: TextField(
-                        controller: _voltageMinController,
-                        keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true,
-                          signed: true,
-                        ),
-                        decoration: const InputDecoration(
-                          labelText: 'Min input value',
-                          hintText: '-10',
-                        ),
-                      ),
+                Expanded(
+                  child: TextField(
+                    controller: _voltageMinController,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                      signed: true,
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: TextField(
-                        controller: _voltageMaxController,
-                        keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true,
-                          signed: true,
-                        ),
-                        decoration: const InputDecoration(
-                          labelText: 'Max input value',
-                          hintText: '10',
-                        ),
-                      ),
+                    decoration: const InputDecoration(
+                      labelText: 'Giá trị vào nhỏ nhất',
+                      hintText: '-10',
                     ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: <Widget>[
-                    Expanded(
-                      child: TextField(
-                        controller: _sampleRateController,
-                        keyboardType: TextInputType.number,
-                        decoration: const InputDecoration(
-                          labelText: 'Sample rate (Hz)',
-                          hintText: '10000',
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: TextField(
-                        controller: _samplesPerReadController,
-                        keyboardType: TextInputType.number,
-                        decoration: const InputDecoration(
-                          labelText: 'Samples per read',
-                          hintText: '1000',
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                FilledButton.icon(
-                  onPressed: _applySamplingSettings,
-                  icon: const Icon(Icons.speed),
-                  label: const Text('Apply sampling'),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  'Current sampling: $_sampleRateHz Hz, $_samplesPerRead samples/read',
-                ),
-                const SizedBox(height: 12),
-                const Text(
-                  'Accelerometer Preset (auto --accel-sens)',
-                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: <Widget>[
-                    Expanded(
-                      child: DropdownButtonFormField<String>(
-                        value: _selectedAccelPresetId,
-                        decoration: const InputDecoration(
-                          labelText: 'Sensor preset',
-                        ),
-                        items: _accelPresets
-                            .map(
-                              (_AccelSensorPreset preset) =>
-                                  DropdownMenuItem<String>(
-                                    value: preset.id,
-                                    child: Text(preset.label),
-                                  ),
-                            )
-                            .toList(),
-                        onChanged: (String? value) {
-                          if (value == null) {
-                            return;
-                          }
-                          setState(() {
-                            _selectedAccelPresetId = value;
-                            final _AccelSensorPreset selected =
-                                _selectedAccelPreset();
-                            if (!selected.isCustom) {
-                              _accelSensitivityController.text = selected
-                                  .sensitivityMvPerG
-                                  .toString();
-                            }
-                          });
-                        },
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    FilledButton.icon(
-                      onPressed: _applyAccelPresetAndSensitivity,
-                      icon: const Icon(Icons.sensors),
-                      label: const Text('Apply preset'),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _accelSensitivityController,
-                  enabled: _selectedAccelPreset().isCustom,
-                  keyboardType: const TextInputType.numberWithOptions(
-                    decimal: true,
-                    signed: false,
-                  ),
-                  decoration: const InputDecoration(
-                    labelText: 'Sensitivity (mV/g)',
-                    hintText: '100',
                   ),
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  'Effective sensitivity: ${_effectiveAccelSensitivityMvPerG().toStringAsFixed(2)} mV/g',
-                ),
-                const SizedBox(height: 14),
-                Row(
-                  children: <Widget>[
-                    Expanded(
-                      child: DropdownButtonFormField<BridgeAiChannelMode>(
-                        value: _aiChannelMode,
-                        decoration: const InputDecoration(
-                          labelText: 'AI channel mode',
-                        ),
-                        items: const <DropdownMenuItem<BridgeAiChannelMode>>[
-                          DropdownMenuItem<BridgeAiChannelMode>(
-                            value: BridgeAiChannelMode.voltage,
-                            child: Text('DAQmxCreateAIVoltageChan'),
-                          ),
-                          DropdownMenuItem<BridgeAiChannelMode>(
-                            value: BridgeAiChannelMode.accel,
-                            child: Text('DAQmxCreateAIAccelChan'),
-                          ),
-                        ],
-                        onChanged: (BridgeAiChannelMode? mode) {
-                          if (mode == null) {
-                            return;
-                          }
-                          setState(() {
-                            _aiChannelMode = mode;
-                          });
-                        },
-                      ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: _voltageMaxController,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                      signed: true,
                     ),
-                    const SizedBox(width: 12),
-                    FilledButton.icon(
-                      onPressed: _applyAiChannelMode,
-                      icon: const Icon(Icons.tune),
-                      label: const Text('Apply mode'),
+                    decoration: const InputDecoration(
+                      labelText: 'Giá trị vào lớn nhất',
+                      hintText: '10',
                     ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Text('Current AI function: ${_aiModeLabel(_aiChannelMode)}'),
-                const SizedBox(height: 12),
-                FilledButton.icon(
-                  onPressed: _applyVoltageRange,
-                  icon: const Icon(Icons.save),
-                  label: const Text('Apply range'),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  'Current range: ${_voltageMin.toStringAsFixed(2)} ${_bridgeRawUnitLabel()} .. ${_voltageMax.toStringAsFixed(2)} ${_bridgeRawUnitLabel()}',
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  'Bridge args: $_bridgeArguments',
-                  style: const TextStyle(fontSize: 12.5),
-                ),
-                const SizedBox(height: 14),
-                const Divider(height: 1),
-                const SizedBox(height: 14),
-                const Text(
-                  'Chart Scale (g)',
-                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: <Widget>[
-                    Expanded(
-                      child: TextField(
-                        controller: _chartMinController,
-                        keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true,
-                          signed: true,
-                        ),
-                        decoration: const InputDecoration(
-                          labelText: 'Chart min (g)',
-                          hintText: '0.0',
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: TextField(
-                        controller: _chartMaxController,
-                        keyboardType: const TextInputType.numberWithOptions(
-                          decimal: true,
-                          signed: true,
-                        ),
-                        decoration: const InputDecoration(
-                          labelText: 'Chart max (g)',
-                          hintText: '1.2',
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                FilledButton.icon(
-                  onPressed: _applyChartScale,
-                  icon: const Icon(Icons.stacked_line_chart),
-                  label: const Text('Apply chart scale'),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  'Current chart scale: ${_chartMinG.toStringAsFixed(2)} g .. ${_chartMaxG.toStringAsFixed(2)} g',
-                ),
-                const SizedBox(height: 14),
-                const Divider(height: 1),
-                const SizedBox(height: 14),
-                const Text(
-                  'Alert Thresholds',
-                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: <Widget>[
-                    Expanded(
-                      child: _thresholdEditor(
-                        title: 'Ngưỡng cảnh báo',
-                        value: _warningThreshold,
-                        onChanged: (double value) {
-                          setState(() {
-                            _warningThreshold = value;
-                            if (_warningThreshold >= _dangerThreshold) {
-                              _dangerThreshold = (_warningThreshold + 0.05)
-                                  .clamp(_chartMinG, _chartMaxG);
-                            }
-                          });
-                        },
-                      ),
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: _thresholdEditor(
-                        title: 'Ngưỡng cảnh báo 2',
-                        value: _dangerThreshold,
-                        onChanged: (double value) {
-                          setState(() {
-                            _dangerThreshold = value;
-                            if (_dangerThreshold <= _warningThreshold) {
-                              _warningThreshold = (_dangerThreshold - 0.05)
-                                  .clamp(_chartMinG, _chartMaxG);
-                            }
-                          });
-                        },
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
               ],
             ),
-          ),
+            const SizedBox(height: 10),
+            Text(
+              'Dải đo hiện tại: ${_voltageMin.toStringAsFixed(2)} ${_bridgeRawUnitLabel()} .. ${_voltageMax.toStringAsFixed(2)} ${_bridgeRawUnitLabel()}',
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Tham số bridge: $_bridgeArguments',
+              style: const TextStyle(fontSize: 12.5),
+            ),
+            const SizedBox(height: 12),
+            _buildSettingsActionBar(
+              onReset: _resetDaqSamplingDefaults,
+              applyButtons: <Widget>[
+                FilledButton.icon(
+                  onPressed: _applyVoltageRange,
+                  icon: const Icon(Icons.save),
+                  label: const Text('Áp dụng dải đo'),
+                ),
+              ],
+            ),
+          ],
+        ),
+        _buildSettingsSectionCard(
+          icon: Icons.speed,
+          title: 'Lấy mẫu DAQ',
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: TextField(
+                    controller: _sampleRateController,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: 'Tần số lấy mẫu (Hz)',
+                      hintText: '10000',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: _samplesPerReadController,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: 'Số mẫu mỗi lần đọc',
+                      hintText: '1000',
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Lấy mẫu hiện tại: $_sampleRateHz Hz, $_samplesPerRead mẫu/lần đọc',
+            ),
+            const SizedBox(height: 12),
+            _buildSettingsActionBar(
+              onReset: _resetDaqSamplingDefaults,
+              applyButtons: <Widget>[
+                FilledButton.icon(
+                  onPressed: _applySamplingSettings,
+                  icon: const Icon(Icons.speed),
+                  label: const Text('Áp dụng lấy mẫu'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            const Divider(height: 1),
+            const SizedBox(height: 14),
+            _buildControlPanel(embedded: true),
+          ],
+        ),
+        _buildSettingsSectionCard(
+          icon: Icons.sensors,
+          title: 'Cảm biến và chế độ AI',
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: DropdownButtonFormField<String>(
+                    value: _selectedAccelPresetId,
+                    decoration: const InputDecoration(
+                      labelText: 'Mẫu cảm biến',
+                    ),
+                    items: _accelPresets
+                        .map(
+                          (_AccelSensorPreset preset) =>
+                              DropdownMenuItem<String>(
+                                value: preset.id,
+                                child: Text(preset.label),
+                              ),
+                        )
+                        .toList(),
+                    onChanged: (String? value) {
+                      if (value == null) {
+                        return;
+                      }
+                      setState(() {
+                        _selectedAccelPresetId = value;
+                        final _AccelSensorPreset selected =
+                            _selectedAccelPreset();
+                        if (!selected.isCustom) {
+                          _accelSensitivityController.text = selected
+                              .sensitivityMvPerG
+                              .toString();
+                        }
+                      });
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _accelSensitivityController,
+              enabled: _selectedAccelPreset().isCustom,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+                signed: false,
+              ),
+              decoration: const InputDecoration(
+                labelText: 'Độ nhạy (mV/g)',
+                hintText: '100',
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Độ nhạy đang dùng: ${_effectiveAccelSensitivityMvPerG().toStringAsFixed(2)} mV/g',
+            ),
+            const SizedBox(height: 14),
+            const Divider(height: 1),
+            const SizedBox(height: 14),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: DropdownButtonFormField<BridgeAiChannelMode>(
+                    value: _aiChannelMode,
+                    decoration: const InputDecoration(
+                      labelText: 'Chế độ kênh AI',
+                    ),
+                    items: const <DropdownMenuItem<BridgeAiChannelMode>>[
+                      DropdownMenuItem<BridgeAiChannelMode>(
+                        value: BridgeAiChannelMode.voltage,
+                        child: Text('DAQmxCreateAIVoltageChan'),
+                      ),
+                      DropdownMenuItem<BridgeAiChannelMode>(
+                        value: BridgeAiChannelMode.accel,
+                        child: Text('DAQmxCreateAIAccelChan'),
+                      ),
+                    ],
+                    onChanged: (BridgeAiChannelMode? mode) {
+                      if (mode == null) {
+                        return;
+                      }
+                      setState(() {
+                        _aiChannelMode = mode;
+                      });
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text('Hàm AI hiện tại: ${_aiModeLabel(_aiChannelMode)}'),
+            const SizedBox(height: 12),
+            _buildSettingsActionBar(
+              onReset: _resetSensorAiDefaults,
+              applyButtons: <Widget>[
+                FilledButton.icon(
+                  onPressed: _applyAccelPresetAndSensitivity,
+                  icon: const Icon(Icons.sensors),
+                  label: const Text('Áp dụng mẫu cảm biến'),
+                ),
+                FilledButton.icon(
+                  onPressed: _applyAiChannelMode,
+                  icon: const Icon(Icons.tune),
+                  label: const Text('Áp dụng chế độ AI'),
+                ),
+              ],
+            ),
+          ],
+        ),
+        _buildSettingsSectionCard(
+          icon: Icons.stacked_line_chart,
+          title: 'Hiển thị và cảnh báo',
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: TextField(
+                    controller: _chartMinController,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                      signed: true,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Giá trị nhỏ nhất của đồ thị (g)',
+                      hintText: '0.0',
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: _chartMaxController,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                      signed: true,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Giá trị lớn nhất của đồ thị (g)',
+                      hintText: '1.2',
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Thang đo hiện tại: ${_chartMinG.toStringAsFixed(2)} g .. ${_chartMaxG.toStringAsFixed(2)} g',
+            ),
+            const SizedBox(height: 14),
+            const Divider(height: 1),
+            const SizedBox(height: 14),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: _thresholdEditor(
+                    title: 'Ngưỡng cảnh báo',
+                    value: _warningThreshold,
+                    onChanged: (double value) {
+                      setState(() {
+                        _warningThreshold = value;
+                        if (_warningThreshold >= _dangerThreshold) {
+                          _dangerThreshold = (_warningThreshold + 0.05).clamp(
+                            _chartMinG,
+                            _chartMaxG,
+                          );
+                        }
+                      });
+                    },
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: _thresholdEditor(
+                    title: 'Ngưỡng cảnh báo 2',
+                    value: _dangerThreshold,
+                    onChanged: (double value) {
+                      setState(() {
+                        _dangerThreshold = value;
+                        if (_dangerThreshold <= _warningThreshold) {
+                          _warningThreshold = (_dangerThreshold - 0.05).clamp(
+                            _chartMinG,
+                            _chartMaxG,
+                          );
+                        }
+                      });
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            _buildSettingsActionBar(
+              onReset: _resetDisplayAlertDefaults,
+              applyButtons: <Widget>[
+                FilledButton.icon(
+                  onPressed: _applyChartScale,
+                  icon: const Icon(Icons.stacked_line_chart),
+                  label: const Text('Áp dụng thang đo'),
+                ),
+              ],
+            ),
+          ],
         ),
       ],
+    );
+  }
+
+  Widget _buildSettingsActionBar({
+    required VoidCallback onReset,
+    required List<Widget> applyButtons,
+  }) {
+    return Align(
+      alignment: Alignment.centerRight,
+      child: Wrap(
+        spacing: 10,
+        runSpacing: 8,
+        alignment: WrapAlignment.end,
+        children: <Widget>[
+          ...applyButtons,
+          OutlinedButton.icon(
+            onPressed: onReset,
+            icon: const Icon(Icons.restart_alt),
+            label: const Text('Đặt lại mặc định'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _resetDaqSamplingDefaults() {
+    setState(() {
+      _voltageMin = -10.0;
+      _voltageMax = 10.0;
+      _sampleRateHz = 10000;
+      _samplesPerRead = 1000;
+
+      _voltageMinController.text = _voltageMin.toString();
+      _voltageMaxController.text = _voltageMax.toString();
+      _sampleRateController.text = _sampleRateHz.toString();
+      _samplesPerReadController.text = _samplesPerRead.toString();
+
+      _bridgeArguments = _upsertBridgeFlag(
+        _bridgeArguments,
+        '--min',
+        _voltageMin.toString(),
+      );
+      _bridgeArguments = _upsertBridgeFlag(
+        _bridgeArguments,
+        '--max',
+        _voltageMax.toString(),
+      );
+      _bridgeArguments = _upsertBridgeFlag(
+        _bridgeArguments,
+        '--rate',
+        _sampleRateHz.toString(),
+      );
+      _bridgeArguments = _upsertBridgeFlag(
+        _bridgeArguments,
+        '--samples',
+        _samplesPerRead.toString(),
+      );
+      _bridgeArgsController.text = _bridgeArguments;
+
+      _eventLogs.insert(
+        0,
+        '[${DateTime.now().toLocal()}] Đặt lại cài đặt đầu vào và lấy mẫu về mặc định.',
+      );
+      _trimLogs();
+    });
+
+    _acquisitionService.setMockSamplingConfig(
+      sampleRateHz: _sampleRateHz,
+      samplesPerRead: _samplesPerRead,
+    );
+    if (!_useBridge) {
+      _startAcquisition();
+    }
+    unawaited(_saveSettings());
+  }
+
+  void _resetSensorAiDefaults() {
+    setState(() {
+      _selectedAccelPresetId = 'EX607A01';
+      _customAccelSensitivityMvPerG = 100.0;
+      _aiChannelMode = BridgeAiChannelMode.voltage;
+
+      _accelSensitivityController.text = _customAccelSensitivityMvPerG
+          .toString();
+
+      _bridgeArguments = _upsertBridgeFlag(
+        _bridgeArguments,
+        '--ai-mode',
+        _aiModeFlagValue(_aiChannelMode),
+      );
+      _bridgeArguments = _upsertBridgeFlag(
+        _bridgeArguments,
+        '--accel-sens',
+        _effectiveAccelSensitivityMvPerG().toString(),
+      );
+      _bridgeArgsController.text = _bridgeArguments;
+
+      _eventLogs.insert(
+        0,
+        '[${DateTime.now().toLocal()}] Đặt lại cài đặt cảm biến và chế độ AI về mặc định.',
+      );
+      _trimLogs();
+    });
+
+    _syncAcquisitionSignalUnit();
+    unawaited(_saveSettings());
+  }
+
+  void _resetDisplayAlertDefaults() {
+    setState(() {
+      _chartMinG = 0.0;
+      _chartMaxG = 1.2;
+      _warningThreshold = 0.65;
+      _dangerThreshold = 0.85;
+
+      _chartMinController.text = _chartMinG.toString();
+      _chartMaxController.text = _chartMaxG.toString();
+
+      _eventLogs.insert(
+        0,
+        '[${DateTime.now().toLocal()}] Đặt lại thang đo đồ thị và ngưỡng cảnh báo về mặc định.',
+      );
+      _trimLogs();
+    });
+
+    unawaited(_saveSettings());
+  }
+
+  Widget _buildSettingsSectionCard({
+    required IconData icon,
+    required String title,
+    required List<Widget> children,
+  }) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Icon(icon, size: 18, color: const Color(0xFF005A9C)),
+                const SizedBox(width: 8),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 16,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            ...children,
+          ],
+        ),
+      ),
     );
   }
 
@@ -3045,9 +3222,9 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         ? (_isConnected &&
                   _actualSampleRateHz != null &&
                   _actualSamplesPerRead != null
-              ? 'Actual: ${_actualSampleRateHz!} Hz | ${_actualSamplesPerRead!} samples/read'
-              : 'Actual: waiting for bridge data...')
-        : 'Actual: demo source';
+              ? 'Thực tế: ${_actualSampleRateHz!} Hz | ${_actualSamplesPerRead!} mẫu/lần đọc'
+              : 'Thực tế: đang chờ dữ liệu bridge...')
+        : 'Thực tế: nguồn demo';
 
     return Card(
       child: Padding(
@@ -3061,7 +3238,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    'Config: $_sampleRateHz Hz | $_samplesPerRead samples/read',
+                    'Cấu hình: $_sampleRateHz Hz | $_samplesPerRead mẫu/lần đọc',
                     style: const TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.w700,
@@ -3086,120 +3263,56 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     );
   }
 
-  Widget _buildControlPanel() {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            const Text(
-              'Acquisition Control',
-              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _bridgePathController,
-              enabled: !Platform.isWindows,
-              decoration: InputDecoration(
-                labelText: Platform.isWindows
-                    ? 'Bridge executable path (not used on Windows)'
-                    : 'Bridge executable path',
-                hintText: Platform.isWindows
-                    ? 'Windows uses the built-in NI-DAQ bridge'
-                    : 'D:\\your-adapter\\daq_bridge.exe',
-              ),
-              onChanged: (String value) {
-                _bridgeExecutablePath = value.trim();
-              },
-            ),
-            const SizedBox(height: 8),
-            TextField(
-              controller: _bridgeArgsController,
-              decoration: const InputDecoration(
-                labelText: 'Bridge arguments',
-                hintText: '--stream --rate 10000 --samples 1000',
-              ),
-              onChanged: (String value) {
-                setState(() {
-                  _bridgeArguments = value;
-                  _aiChannelMode = _extractAiModeFromArgs(value);
-                });
-                _syncAcquisitionSignalUnit();
-              },
-            ),
-            const SizedBox(height: 10),
-            Text(
-              _useBridge
-                  ? 'Bridge config: ${_bridgeExecutablePath.isEmpty ? '<not set>' : _bridgeExecutablePath} | args: $_bridgeArguments'
-                  : 'Sampling interval: $_sampleIntervalMs ms',
-            ),
-            if (!_useBridge)
-              Slider(
-                min: 100,
-                max: 1200,
-                divisions: 11,
-                value: _sampleIntervalMs.toDouble(),
-                label: '$_sampleIntervalMs ms',
-                onChanged: (double value) {
-                  setState(() {
-                    _sampleIntervalMs = value.toInt();
-                    _startAcquisition();
-                  });
-                },
-              ),
-            if (_lastAutoFallbackAt != null) ...[
-              const SizedBox(height: 10),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 8,
-                ),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFFFF4E8),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: const Color(0xFFE4A100)),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        const Icon(
-                          Icons.warning_amber_rounded,
-                          color: Color(0xFFE4A100),
-                          size: 18,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'Auto fallback at ${_lastAutoFallbackAt!.toLocal()}: switched to voltage mode. $_lastAutoFallbackReason',
-                            style: const TextStyle(
-                              fontSize: 12,
-                              color: Color(0xFF6D4C1A),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: TextButton.icon(
-                        onPressed: _resetAutoFallbackStatus,
-                        icon: const Icon(Icons.clear, size: 16),
-                        label: const Text('Reset fallback status'),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ],
+  Widget _buildControlPanel({bool embedded = false}) {
+    final ButtonStyle presetButtonStyle = OutlinedButton.styleFrom(
+      visualDensity: VisualDensity.compact,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+    );
+
+    final Widget content = Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: <Widget>[
+        OutlinedButton(
+          style: presetButtonStyle,
+          onPressed: () {
+            _applyBridgePreset(
+              '--stream --rate 5000 --samples 500 --min -10 --max 10 --ai-mode voltage cDAQ9181-1E439C1Mod1/ai0:15',
+              'On dinh 16 kenh',
+            );
+          },
+          child: const Text('Ổn định'),
         ),
-      ),
+        OutlinedButton(
+          style: presetButtonStyle,
+          onPressed: () {
+            _applyBridgePreset(
+              '--stream --rate 20000 --samples 400 --min -10 --max 10 --ai-mode voltage cDAQ9181-1E439C1Mod1/ai0:15',
+              'Bat xung nhanh 20ms',
+            );
+          },
+          child: const Text('Nhanh'),
+        ),
+        OutlinedButton(
+          style: presetButtonStyle,
+          onPressed: () {
+            _applyBridgePreset(
+              '--stream --rate 2500 --samples 250 --min -10 --max 10 --ai-mode voltage cDAQ9181-1E439C1Mod1/ai0:15',
+              'Nhe CPU',
+            );
+          },
+          child: const Text('Nhẹ CPU'),
+        ),
+      ],
+    );
+
+    if (embedded) {
+      return content;
+    }
+
+    return Card(
+      child: Padding(padding: const EdgeInsets.all(14), child: content),
     );
   }
 
@@ -3221,139 +3334,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
           onChanged: onChanged,
         ),
       ],
-    );
-  }
-
-  Widget _buildSummaryPanel(
-    int normalCount,
-    int warningCount,
-    int dangerCount,
-    double maxSignal,
-    double ai9RawRms,
-  ) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Wrap(
-          spacing: 10,
-          runSpacing: 10,
-          children: <Widget>[
-            _summaryTile(
-              _stateLabel(SensorState.normal),
-              normalCount.toString(),
-              const Color(0xFF2E8B57),
-            ),
-            _summaryTile(
-              _stateLabel(SensorState.warning),
-              warningCount.toString(),
-              const Color(0xFFE4A100),
-            ),
-            _summaryTile(
-              _stateLabel(SensorState.danger),
-              dangerCount.toString(),
-              const Color(0xFFC0392B),
-            ),
-            _summaryTile(
-              'Peak signal',
-              '${maxSignal.toStringAsFixed(3)} g',
-              const Color(0xFF005A9C),
-            ),
-            _summaryTile(
-              'AI9 raw RMS',
-              '${ai9RawRms.toStringAsFixed(4)} ${_bridgeRawUnitLabel()}',
-              const Color(0xFF4A6FA5),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildVoltageRangePanel() {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            const Text(
-              'DAQ Input Range',
-              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-            ),
-            const SizedBox(height: 12),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: <Widget>[
-                _rangeValueTile(
-                  _aiChannelMode == BridgeAiChannelMode.accel
-                      ? 'Min g'
-                      : 'Min V',
-                  '${_voltageMin.toStringAsFixed(2)} ${_bridgeRawUnitLabel()}',
-                  const Color(0xFF2E8B57),
-                ),
-                _rangeValueTile(
-                  _aiChannelMode == BridgeAiChannelMode.accel
-                      ? 'Max g'
-                      : 'Max V',
-                  '${_voltageMax.toStringAsFixed(2)} ${_bridgeRawUnitLabel()}',
-                  const Color(0xFF005A9C),
-                ),
-                _rangeValueTile(
-                  'Range',
-                  '${(_voltageMax - _voltageMin).toStringAsFixed(2)} ${_bridgeRawUnitLabel()}',
-                  const Color(0xFFE4A100),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _rangeValueTile(String label, String value, Color color) {
-    return Column(
-      children: <Widget>[
-        Text(
-          label,
-          style: TextStyle(
-            color: color,
-            fontWeight: FontWeight.w700,
-            fontSize: 12,
-          ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          value,
-          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
-        ),
-      ],
-    );
-  }
-
-  Widget _summaryTile(String label, String value, Color color) {
-    return Container(
-      width: 170,
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withValues(alpha: 0.3)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Text(
-            label,
-            style: TextStyle(color: color, fontWeight: FontWeight.w700),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            value,
-            style: const TextStyle(fontSize: 21, fontWeight: FontWeight.w800),
-          ),
-        ],
-      ),
     );
   }
 
@@ -3621,19 +3601,21 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
           crossAxisAlignment: CrossAxisAlignment.start,
           children: const <Widget>[
             Text(
-              'System Pipeline',
+              'Đường truyền hệ thống',
               style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
             ),
             SizedBox(height: 10),
-            Text('C Series Sensor Module -> cDAQ Chassis -> NI-DAQmx C API'),
-            SizedBox(height: 4),
-            Text('External DAQ adapter process -> Flutter stdout parser'),
+            Text('Module cảm biến C Series -> Khung cDAQ -> NI-DAQmx C API'),
             SizedBox(height: 4),
             Text(
-              'Reference folder cdaq-9181-console is optional guidance only.',
+              'Tiến trình adapter DAQ bên ngoài -> Bộ phân tích stdout Flutter',
+            ),
+            SizedBox(height: 4),
+            Text(
+              'Thư mục tham chiếu cdaq-9181-console chỉ mang tính hướng dẫn.',
             ),
             Text(
-              'Expected line protocol: DATA_MULTI,<rate>,<samplesRead>,<channelCount>,<rms0>...<rmsN>',
+              'Giao thức dòng dự kiến: DATA_MULTI,<rate>,<samplesRead>,<channelCount>,<rms0>...<rmsN>',
             ),
           ],
         ),
@@ -3649,13 +3631,13 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             const Text(
-              'Event Log',
+              'Nhật ký sự kiện',
               style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
             ),
             const SizedBox(height: 8),
             Expanded(
               child: _eventLogs.isEmpty
-                  ? const Center(child: Text('No events yet'))
+                  ? const Center(child: Text('Chưa có sự kiện'))
                   : ListView.separated(
                       itemCount: _eventLogs.length,
                       separatorBuilder: (_, __) => const Divider(height: 8),

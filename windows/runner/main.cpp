@@ -27,7 +27,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
-  if (!window.Create(L"Cảnh báo bắn mìn - Địa vật lý Giếng Khoang", origin, size)) {
+  // Use explicit Unicode code points to avoid source-encoding issues on Windows title bar.
+  constexpr wchar_t kWindowTitle[] =
+      L"C\u1ea3nh b\u00e1o b\u1eafn m\u00ecn - \u0110\u1ecba v\u1eadt l\u00fd Gi\u1ebfng Khoang";
+  if (!window.Create(kWindowTitle, origin, size)) {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);
