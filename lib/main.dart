@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:fl_chart/fl_chart.dart';
@@ -198,6 +199,10 @@ class MyApp extends StatelessWidget {
 
 enum SensorState { normal, warning, danger }
 
+enum _EventLogLevel { info, warning, danger }
+
+enum _EventLogFilter { all, info, warning, danger }
+
 class _CombinedWindowOption {
   const _CombinedWindowOption({required this.label, required this.minutes});
 
@@ -229,6 +234,8 @@ class _LoggedSample {
     this.samplesRead,
     this.wavePayloadJson,
     this.fftPayloadJson,
+    this.wavePayloadBytes,
+    this.fftPayloadBytes,
   });
 
   final DateTime timestamp;
@@ -237,6 +244,8 @@ class _LoggedSample {
   final int? samplesRead;
   final String? wavePayloadJson;
   final String? fftPayloadJson;
+  final Uint8List? wavePayloadBytes;
+  final Uint8List? fftPayloadBytes;
 
   Map<String, Object?> toJson() {
     return <String, Object?>{
@@ -247,19 +256,6 @@ class _LoggedSample {
       'wavePayloadJson': wavePayloadJson,
       'fftPayloadJson': fftPayloadJson,
     };
-  }
-
-  List<String> toCsvRow(List<String> channels) {
-    return <String>[
-      timestamp.toUtc().toIso8601String(),
-      sampleRateHz?.toString() ?? '',
-      samplesRead?.toString() ?? '',
-      ...channels.map(
-        (String channel) => values[channel]?.toStringAsFixed(6) ?? '',
-      ),
-      wavePayloadJson ?? '',
-      fftPayloadJson ?? '',
-    ];
   }
 
   static _LoggedSample? fromJsonString(String raw) {
@@ -326,6 +322,30 @@ class _LoggedSample {
   }
 }
 
+class _BinaryTimeIndexEntry {
+  const _BinaryTimeIndexEntry({
+    required this.timestampMsUtc,
+    required this.byteOffset,
+    required this.sampleIndex,
+  });
+
+  final int timestampMsUtc;
+  final int byteOffset;
+  final int sampleIndex;
+}
+
+class _BinaryReplayLoadResult {
+  const _BinaryReplayLoadResult({
+    required this.samples,
+    required this.timeIndex,
+    required this.indexStride,
+  });
+
+  final List<_LoggedSample> samples;
+  final List<_BinaryTimeIndexEntry> timeIndex;
+  final int indexStride;
+}
+
 class MineAlertDashboard extends StatefulWidget {
   const MineAlertDashboard({super.key});
 
@@ -369,7 +389,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   final List<String> _eventLogs = <String>[];
   final List<_LoggedSample> _dataLogs = <_LoggedSample>[];
   final Map<String, List<FlSpot>> _replayHistory = <String, List<FlSpot>>{};
-  final List<_LoggedSample> _replaySamples = <_LoggedSample>[];
+  List<_LoggedSample> _replaySamples = <_LoggedSample>[];
 
   late final DataAcquisitionService _acquisitionService;
   StreamSubscription<AcquisitionSample>? _sampleSub;
@@ -382,14 +402,20 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   bool _dataLoggingBlinkOn = true;
   DateTime? _dataLoggingSessionStartAt;
   File? _dataLoggingSessionFile;
+  RandomAccessFile? _dataLoggingSessionSink;
+  final List<_BinaryTimeIndexEntry> _dataLogTimeIndex =
+      <_BinaryTimeIndexEntry>[];
+  int _dataLogRecordCount = 0;
   bool _isReplayMode = false;
   bool _isReplayPlaying = false;
   bool _isLoadingReplayFile = false;
+  double _replayLoadProgress = 0;
   bool _autoRecoveringAccelUnsupported = false;
   DateTime? _lastAutoFallbackAt;
   String _lastAutoFallbackReason = '';
   int _selectedScreenIndex = 0;
   int _selectedCombinedWindowMinutes = -1;
+  _EventLogFilter _selectedEventLogFilter = _EventLogFilter.all;
   String _fftChannel = 'AI0';
 
   // Latest FFT from C bridge (bridge mode only; empty in mock mode)
@@ -397,12 +423,14 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   int _bridgeFftSampleRateHz = 0;
   int _bridgeFftBinCount = 0;
   int _bridgeFftSamplesRead = 0;
+  DateTime? _bridgeFftCapturedAt;
   StreamSubscription<DaqFftFrame>? _fftSub;
 
   // Latest raw waveform from C bridge (bridge mode only)
   final Map<String, List<double>> _bridgeWaveSamples = <String, List<double>>{};
   int _bridgeWaveSampleRateHz = 0;
   int _bridgeWaveDecimStep = 1;
+  DateTime? _bridgeWaveCapturedAt;
   String _waveChannel = 'AI0';
   double _waveformTimeWindowMs = 200.0; // User-configurable time axis scale
   double _waveformTimeWindowMinMs = 20.0;
@@ -452,9 +480,19 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   double _replaySpeed = 1.0;
   DateTime? _replayPlayStartedAt;
   String? _replayFilePath;
+  List<_BinaryTimeIndexEntry> _replayTimeIndex = <_BinaryTimeIndexEntry>[];
+  int _replayIndexStride = 1;
 
   static const Duration _historyRetention = Duration(hours: 4);
   static const int _maxRecentDataLogs = 200;
+  static const String _binaryLogExtension = 'smm';
+  static const String _binaryLogMagic = 'MALOGB03';
+  static const String _binaryIndexMagic = 'MALIDX01';
+  static const int _binaryLogHeaderSize = 32;
+  static const int _binaryIndexHeaderSize = 16;
+  static const int _binaryIndexEntrySize = 16;
+  static const int _binaryIndexStride = 16;
+  static const Duration _binaryLogRotateEvery = Duration(days: 2);
   static const int _combinedRealtimeSeconds = 60;
   static const List<double> _replaySpeedOptions = <double>[0.5, 1, 2, 4, 8];
   static const List<_AccelSensorPreset> _accelPresets = <_AccelSensorPreset>[
@@ -1244,20 +1282,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     return logDir;
   }
 
-  String _csvEscape(String value) {
-    final bool needsQuotes =
-        value.contains(',') || value.contains('"') || value.contains('\n');
-    if (!needsQuotes) {
-      return value;
-    }
-    final String escaped = value.replaceAll('"', '""');
-    return '"$escaped"';
-  }
-
-  String _buildCsvLine(List<String> columns) {
-    return columns.map(_csvEscape).join(',');
-  }
-
   String _dataLogFileName(DateTime timestamp) {
     final DateTime localTime = timestamp.toLocal();
     final String year = localTime.year.toString().padLeft(4, '0');
@@ -1267,7 +1291,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     final String minute = localTime.minute.toString().padLeft(2, '0');
     final String second = localTime.second.toString().padLeft(2, '0');
     final String timePart = <String>[hour, 'h', minute, 'm', second].join();
-    return 'samples_$year-$month-$day-$timePart.csv';
+    return 'samples_$year-$month-$day-$timePart.$_binaryLogExtension';
   }
 
   Future<File> _ensureCurrentDataLogFile(DateTime timestamp) async {
@@ -1276,21 +1300,337 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       '${logDir.path}${Platform.pathSeparator}${_dataLogFileName(timestamp)}',
     );
     if (!await file.exists()) {
-      final String header = _buildCsvLine(<String>[
-        'timestampUtc',
-        'sampleRateHz',
-        'samplesRead',
-        ..._channels,
-        'wavePayloadJson',
-        'fftPayloadJson',
-      ]);
-      await file.writeAsString('$header\n', flush: true);
+      await file.create(recursive: true);
     }
     return file;
   }
 
+  Future<void> _ensureBinaryLogHeader() async {
+    final RandomAccessFile? sink = _dataLoggingSessionSink;
+    if (sink == null) {
+      return;
+    }
+
+    final int currentLength = await sink.length();
+    if (currentLength > 0) {
+      await sink.setPosition(currentLength);
+      return;
+    }
+
+    final ByteData header = ByteData(_binaryLogHeaderSize);
+    for (int i = 0; i < _binaryLogMagic.length; i++) {
+      header.setUint8(i, _binaryLogMagic.codeUnitAt(i));
+    }
+    header.setUint16(8, _channels.length, Endian.little);
+    // 0 means variable-size records (sample + optional wave/fft payload bytes).
+    header.setUint16(10, 0, Endian.little);
+    // V3 header layout:
+    // [12..19] indexOffset (u64), [20..23] indexCount (u32),
+    // [24..27] indexStride (u32), [28..31] reserved flags.
+    header.setUint64(12, 0, Endian.little);
+    header.setUint32(20, 0, Endian.little);
+    header.setUint32(24, _binaryIndexStride, Endian.little);
+    header.setUint32(28, 0, Endian.little);
+    await sink.writeFrom(header.buffer.asUint8List());
+    await sink.flush();
+  }
+
+  Future<void> _writeBinaryIndexAndPatchHeader(RandomAccessFile sink) async {
+    final int indexOffset = await sink.position();
+    final int entryCount = _dataLogTimeIndex.length;
+
+    final ByteData idxHeader = ByteData(_binaryIndexHeaderSize);
+    for (int i = 0; i < _binaryIndexMagic.length; i++) {
+      idxHeader.setUint8(i, _binaryIndexMagic.codeUnitAt(i));
+    }
+    idxHeader.setUint32(8, entryCount, Endian.little);
+    idxHeader.setUint32(12, _binaryIndexStride, Endian.little);
+    await sink.writeFrom(idxHeader.buffer.asUint8List());
+
+    final Uint8List entryBytes = Uint8List(_binaryIndexEntrySize);
+    final ByteData entryData = ByteData.sublistView(entryBytes);
+    for (final _BinaryTimeIndexEntry entry in _dataLogTimeIndex) {
+      entryData.setInt64(0, entry.timestampMsUtc, Endian.little);
+      entryData.setInt64(8, entry.byteOffset, Endian.little);
+      await sink.writeFrom(entryBytes);
+    }
+
+    final ByteData patch = ByteData(20);
+    patch.setUint64(0, indexOffset, Endian.little);
+    patch.setUint32(8, entryCount, Endian.little);
+    patch.setUint32(12, _binaryIndexStride, Endian.little);
+    patch.setUint32(16, 0, Endian.little);
+    await sink.setPosition(12);
+    await sink.writeFrom(patch.buffer.asUint8List());
+    await sink.setPosition(await sink.length());
+  }
+
+  Uint8List _encodeBinaryLogRecord(_LoggedSample sample) {
+    final List<int> waveBytes = _encodePayloadBytes(sample.wavePayloadJson);
+    final List<int> fftBytes = _encodePayloadBytes(sample.fftPayloadJson);
+    final int channelCount = _channels.length;
+    final int fixedSize = 8 + 4 + 4 + (channelCount * 4) + 4 + 4;
+    final int recordSize = fixedSize + waveBytes.length + fftBytes.length;
+    final ByteData data = ByteData(recordSize);
+
+    data.setInt64(
+      0,
+      sample.timestamp.toUtc().millisecondsSinceEpoch,
+      Endian.little,
+    );
+    data.setInt32(8, sample.sampleRateHz ?? -1, Endian.little);
+    data.setInt32(12, sample.samplesRead ?? -1, Endian.little);
+
+    for (int i = 0; i < channelCount; i++) {
+      final String channel = _channels[i];
+      final double? value = sample.values[channel];
+      data.setFloat32(16 + (i * 4), value ?? double.nan, Endian.little);
+    }
+
+    final int lensOffset = 16 + (channelCount * 4);
+    data.setUint32(lensOffset, waveBytes.length, Endian.little);
+    data.setUint32(lensOffset + 4, fftBytes.length, Endian.little);
+
+    final Uint8List out = data.buffer.asUint8List();
+    int payloadOffset = lensOffset + 8;
+    if (waveBytes.isNotEmpty) {
+      out.setRange(payloadOffset, payloadOffset + waveBytes.length, waveBytes);
+      payloadOffset += waveBytes.length;
+    }
+    if (fftBytes.isNotEmpty) {
+      out.setRange(payloadOffset, payloadOffset + fftBytes.length, fftBytes);
+    }
+
+    return out;
+  }
+
+  List<int> _encodePayloadBytes(String? payloadJson) {
+    if (payloadJson == null) {
+      return const <int>[];
+    }
+    final String text = payloadJson.trim();
+    if (text.isEmpty) {
+      return const <int>[];
+    }
+    return utf8.encode(text);
+  }
+
+  String? _decodePayloadBytes(Uint8List payloadBytes) {
+    if (payloadBytes.isEmpty) {
+      return null;
+    }
+    final String plain = utf8.decode(payloadBytes, allowMalformed: true).trim();
+    return plain.isEmpty ? null : plain;
+  }
+
+  Future<_BinaryReplayLoadResult> _loadReplaySamplesFromBinary(
+    File file, {
+    void Function(double progress)? onProgress,
+  }) async {
+    final RandomAccessFile raf = await file.open(mode: FileMode.read);
+    try {
+      onProgress?.call(0.0);
+      final int fileLength = await raf.length();
+      if (fileLength < _binaryLogHeaderSize) {
+        throw const FormatException(
+          'File log quá nhỏ hoặc không đúng định dạng binary.',
+        );
+      }
+
+      await raf.setPosition(0);
+      final Uint8List headerBytes = await raf.read(_binaryLogHeaderSize);
+      if (headerBytes.length != _binaryLogHeaderSize) {
+        throw const FormatException('Không thể đọc header file log binary.');
+      }
+
+      final ByteData header = ByteData.sublistView(headerBytes);
+      final String magic = String.fromCharCodes(headerBytes.sublist(0, 8));
+      if (magic != _binaryLogMagic) {
+        throw const FormatException(
+          'Sai magic header. Đây không phải file replay binary hợp lệ.',
+        );
+      }
+
+      final int channelCount = header.getUint16(8, Endian.little);
+      final int recordSize = header.getUint16(10, Endian.little);
+      final bool isVariableRecord = recordSize == 0;
+      final int fixedRecordSize = 8 + 4 + 4 + (channelCount * 4);
+      final int fixedWithLengths = fixedRecordSize + 8;
+      if (channelCount <= 0 ||
+          (!isVariableRecord && recordSize != fixedRecordSize)) {
+        throw const FormatException(
+          'Header binary không hợp lệ (channelCount/recordSize).',
+        );
+      }
+
+      int dataEndOffset = fileLength;
+      int loadedIndexStride = _binaryIndexStride;
+      final List<_BinaryTimeIndexEntry> loadedTimeIndex =
+          <_BinaryTimeIndexEntry>[];
+      if (header.lengthInBytes >= 32) {
+        final int indexOffset = header.getUint64(12, Endian.little);
+        final int indexCountFromHeader = header.getUint32(20, Endian.little);
+        final int indexStrideFromHeader = header.getUint32(24, Endian.little);
+        if (indexOffset > _binaryLogHeaderSize && indexOffset < fileLength) {
+          dataEndOffset = indexOffset;
+          await raf.setPosition(indexOffset);
+          final Uint8List idxHeaderBytes = await raf.read(
+            _binaryIndexHeaderSize,
+          );
+          if (idxHeaderBytes.length == _binaryIndexHeaderSize) {
+            final String idxMagic = String.fromCharCodes(
+              idxHeaderBytes.sublist(0, 8),
+            );
+            if (idxMagic == _binaryIndexMagic) {
+              final ByteData idxHeader = ByteData.sublistView(idxHeaderBytes);
+              final int indexCount = idxHeader.getUint32(8, Endian.little);
+              final int indexStride = idxHeader.getUint32(12, Endian.little);
+              final int safeStride = indexStride > 0
+                  ? indexStride
+                  : (indexStrideFromHeader > 0
+                        ? indexStrideFromHeader
+                        : _binaryIndexStride);
+              loadedIndexStride = safeStride;
+              final int expectedCount = indexCountFromHeader > 0
+                  ? min(indexCount, indexCountFromHeader)
+                  : indexCount;
+              for (int i = 0; i < expectedCount; i++) {
+                final Uint8List entryBytes = await raf.read(
+                  _binaryIndexEntrySize,
+                );
+                if (entryBytes.length != _binaryIndexEntrySize) {
+                  break;
+                }
+                final ByteData entry = ByteData.sublistView(entryBytes);
+                loadedTimeIndex.add(
+                  _BinaryTimeIndexEntry(
+                    timestampMsUtc: entry.getInt64(0, Endian.little),
+                    byteOffset: entry.getInt64(8, Endian.little),
+                    sampleIndex: i * safeStride,
+                  ),
+                );
+              }
+            }
+          }
+        }
+      }
+      onProgress?.call(0.05);
+
+      final List<String> activeChannels = channelCount == _channels.length
+          ? _channels
+          : List<String>.generate(channelCount, (int index) => 'AI$index');
+      final List<_LoggedSample> samples = <_LoggedSample>[];
+      int sampleIndex = 0;
+
+      await raf.setPosition(_binaryLogHeaderSize);
+      int lastProgressPos = _binaryLogHeaderSize;
+      while (true) {
+        final int currentPos = await raf.position();
+        final int minRecordSize = isVariableRecord
+            ? fixedWithLengths
+            : fixedRecordSize;
+        if (currentPos + minRecordSize > dataEndOffset) {
+          break;
+        }
+
+        final Uint8List baseBytes = await raf.read(minRecordSize);
+        if (baseBytes.length != minRecordSize) {
+          break;
+        }
+        final ByteData base = ByteData.sublistView(baseBytes);
+        final int timestampMsUtc = base.getInt64(0, Endian.little);
+        final int sampleRateHz = base.getInt32(8, Endian.little);
+        final int samplesRead = base.getInt32(12, Endian.little);
+
+        final Map<String, double> values = <String, double>{};
+        for (int i = 0; i < activeChannels.length; i++) {
+          final double v = base.getFloat32(16 + (i * 4), Endian.little);
+          if (!v.isNaN) {
+            values[activeChannels[i]] = v;
+          }
+        }
+
+        Uint8List? wavePayloadBytes;
+        Uint8List? fftPayloadBytes;
+        if (isVariableRecord) {
+          final int lensOffset = 16 + (channelCount * 4);
+          final int waveLen = base.getUint32(lensOffset, Endian.little);
+          final int fftLen = base.getUint32(lensOffset + 4, Endian.little);
+          final int payloadBytes = waveLen + fftLen;
+          if (payloadBytes > 0) {
+            final int payloadPos = await raf.position();
+            if (payloadPos + payloadBytes > dataEndOffset) {
+              break;
+            }
+            final Uint8List payload = await raf.read(payloadBytes);
+            if (payload.length != payloadBytes) {
+              break;
+            }
+            if (waveLen > 0) {
+              wavePayloadBytes = Uint8List.fromList(
+                payload.sublist(0, waveLen),
+              );
+            }
+            if (fftLen > 0) {
+              fftPayloadBytes = Uint8List.fromList(
+                payload.sublist(waveLen, waveLen + fftLen),
+              );
+            }
+          }
+        }
+
+        if (values.isNotEmpty) {
+          samples.add(
+            _LoggedSample(
+              timestamp: DateTime.fromMillisecondsSinceEpoch(
+                timestampMsUtc,
+                isUtc: true,
+              ).toLocal(),
+              values: values,
+              sampleRateHz: sampleRateHz > 0 ? sampleRateHz : null,
+              samplesRead: samplesRead > 0 ? samplesRead : null,
+              wavePayloadBytes: wavePayloadBytes,
+              fftPayloadBytes: fftPayloadBytes,
+            ),
+          );
+          if (loadedTimeIndex.isEmpty &&
+              (sampleIndex == 0 || sampleIndex % _binaryIndexStride == 0)) {
+            loadedTimeIndex.add(
+              _BinaryTimeIndexEntry(
+                timestampMsUtc: timestampMsUtc,
+                byteOffset: currentPos,
+                sampleIndex: sampleIndex,
+              ),
+            );
+            loadedIndexStride = _binaryIndexStride;
+          }
+          sampleIndex += 1;
+        }
+
+        if (currentPos - lastProgressPos >= 262144) {
+          lastProgressPos = currentPos;
+          final double p = (currentPos / max(1, dataEndOffset))
+              .clamp(0.0, 1.0)
+              .toDouble();
+          onProgress?.call(p);
+        }
+      }
+
+      onProgress?.call(1.0);
+
+      return _BinaryReplayLoadResult(
+        samples: samples,
+        timeIndex: loadedTimeIndex,
+        indexStride: max(1, loadedIndexStride),
+      );
+    } finally {
+      await raf.close();
+    }
+  }
+
   String? _buildWavePayloadJsonForLog() {
-    if (_bridgeWaveSampleRateHz <= 0) {
+    if (_bridgeWaveSampleRateHz <= 0 ||
+        !_isPayloadFresh(_bridgeWaveCapturedAt)) {
       return null;
     }
     final Map<String, List<double>> channels = <String, List<double>>{};
@@ -1307,13 +1647,16 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     return jsonEncode(<String, Object?>{
       'sampleRateHz': _bridgeWaveSampleRateHz,
       'decimStep': _bridgeWaveDecimStep,
+      'capturedAtUtc': _bridgeWaveCapturedAt!.toUtc().toIso8601String(),
       'unit': _bridgeRawUnitLabel(),
       'channels': channels,
     });
   }
 
   String? _buildFftPayloadJsonForLog() {
-    if (_bridgeFftSampleRateHz <= 0 || _bridgeFftBinCount <= 0) {
+    if (_bridgeFftSampleRateHz <= 0 ||
+        _bridgeFftBinCount <= 0 ||
+        !_isPayloadFresh(_bridgeFftCapturedAt)) {
       return null;
     }
     final Map<String, List<double>> channels = <String, List<double>>{};
@@ -1331,8 +1674,27 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       'sampleRateHz': _bridgeFftSampleRateHz,
       'samplesRead': _bridgeFftSamplesRead,
       'binCount': _bridgeFftBinCount,
+      'capturedAtUtc': _bridgeFftCapturedAt!.toUtc().toIso8601String(),
       'channels': channels,
     });
+  }
+
+  int _payloadFreshnessWindowMs() {
+    final int sampleRate = _actualSampleRateHz ?? _sampleRateHz;
+    final int samplesPerRead = _actualSamplesPerRead ?? _samplesPerRead;
+    if (sampleRate <= 0 || samplesPerRead <= 0) {
+      return 500;
+    }
+    final int blockMs = ((samplesPerRead * 1000) / sampleRate).round();
+    return max(300, blockMs * 2);
+  }
+
+  bool _isPayloadFresh(DateTime? capturedAt) {
+    if (capturedAt == null) {
+      return false;
+    }
+    return DateTime.now().difference(capturedAt).inMilliseconds <=
+        _payloadFreshnessWindowMs();
   }
 
   Future<void> _startDataLoggingSession({DateTime? startedAt}) async {
@@ -1342,37 +1704,67 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       _dataLoggingSessionStartAt!,
     );
     _dataLoggingSessionFile = file;
+    _dataLoggingSessionSink ??= await file.open(mode: FileMode.append);
+    _dataLogTimeIndex.clear();
+    _dataLogRecordCount = 0;
+    await _ensureBinaryLogHeader();
   }
 
   Future<void> _finalizeDataLoggingSession() async {
     final DateTime? sessionStartAt = _dataLoggingSessionStartAt;
     final File? sessionFile = _dataLoggingSessionFile;
+    final RandomAccessFile? sessionSink = _dataLoggingSessionSink;
     _dataLoggingSessionStartAt = null;
     _dataLoggingSessionFile = null;
+    _dataLoggingSessionSink = null;
 
     if (sessionStartAt == null || sessionFile == null) {
+      await sessionSink?.close();
+      _dataLogTimeIndex.clear();
+      _dataLogRecordCount = 0;
       return;
     }
 
-    final String footer = _buildCsvLine(<String>[
-      'sessionStartLocal',
-      sessionStartAt.toLocal().toIso8601String(),
-    ]);
-    await sessionFile.writeAsString(
-      '$footer\n',
-      mode: FileMode.append,
-      flush: true,
-    );
+    if (sessionSink != null && _dataLogTimeIndex.isNotEmpty) {
+      await _writeBinaryIndexAndPatchHeader(sessionSink);
+    }
+
+    await sessionSink?.flush();
+    await sessionSink?.close();
+    _dataLogTimeIndex.clear();
+    _dataLogRecordCount = 0;
   }
 
   Future<void> _appendDataLogToArchive(_LoggedSample sample) async {
-    final DateTime sessionStartAt =
+    DateTime sessionStartAt =
         _dataLoggingSessionStartAt ?? sample.timestamp.toLocal();
+    if (sample.timestamp.toLocal().difference(sessionStartAt) >=
+        _binaryLogRotateEvery) {
+      await _finalizeDataLoggingSession();
+      sessionStartAt = sample.timestamp.toLocal();
+      _dataLoggingSessionStartAt = sessionStartAt;
+    }
+
     _dataLoggingSessionStartAt ??= sessionStartAt;
     final File file = await _ensureCurrentDataLogFile(sessionStartAt);
     _dataLoggingSessionFile ??= file;
-    final String line = _buildCsvLine(sample.toCsvRow(_channels));
-    await file.writeAsString('$line\n', mode: FileMode.append, flush: true);
+    _dataLoggingSessionSink ??= await file.open(mode: FileMode.append);
+    await _ensureBinaryLogHeader();
+    final int offsetBeforeWrite = await _dataLoggingSessionSink!.position();
+    final Uint8List record = _encodeBinaryLogRecord(sample);
+    await _dataLoggingSessionSink!.writeFrom(record);
+
+    if (_dataLogRecordCount == 0 ||
+        _dataLogRecordCount % _binaryIndexStride == 0) {
+      _dataLogTimeIndex.add(
+        _BinaryTimeIndexEntry(
+          timestampMsUtc: sample.timestamp.toUtc().millisecondsSinceEpoch,
+          byteOffset: offsetBeforeWrite,
+          sampleIndex: _dataLogRecordCount,
+        ),
+      );
+    }
+    _dataLogRecordCount += 1;
   }
 
   void _appendDataLog(AcquisitionSample sample) {
@@ -1415,258 +1807,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     await resolvedPrefs.setStringList(_prefRecentLoggedSamples, encoded);
   }
 
-  Future<void> _clearDataLogs() async {
-    _dataLogSaveDebounce?.cancel();
-    _dataLoggingSessionStartAt = null;
-    _dataLoggingSessionFile = null;
-    final Directory logDir = await _ensureDataLogDirectory();
-    if (await logDir.exists()) {
-      await logDir.delete(recursive: true);
-    }
-    _dataLogDirectory = null;
-    setState(() {
-      _dataLogs.clear();
-      _eventLogs.insert(0, '[${DateTime.now().toLocal()}] Cleared logged data');
-      _trimLogs();
-    });
-
-    final SharedPreferences prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_prefRecentLoggedSamples);
-  }
-
-  List<String> _parseCsvFields(String line, {String delimiter = ','}) {
-    final List<String> fields = <String>[];
-    final StringBuffer current = StringBuffer();
-    bool inQuotes = false;
-
-    for (int i = 0; i < line.length; i++) {
-      final String char = line[i];
-      if (char == '"') {
-        if (inQuotes && i + 1 < line.length && line[i + 1] == '"') {
-          current.write('"');
-          i++;
-        } else {
-          inQuotes = !inQuotes;
-        }
-        continue;
-      }
-
-      if (char == delimiter && !inQuotes) {
-        fields.add(current.toString());
-        current.clear();
-        continue;
-      }
-
-      current.write(char);
-    }
-
-    fields.add(current.toString());
-    return fields;
-  }
-
-  String _normalizeCsvHeader(String value) {
-    return value.replaceFirst('\ufeff', '').trim();
-  }
-
-  String _normalizeHeaderKey(String value) {
-    return _normalizeCsvHeader(value).toLowerCase().replaceAll(' ', '');
-  }
-
-  String _detectCsvDelimiter(String headerLine) {
-    const List<String> delimiters = <String>[',', ';', '\t'];
-    String best = ',';
-    int bestCount = -1;
-    for (final String delimiter in delimiters) {
-      final int count = _parseCsvFields(
-        headerLine,
-        delimiter: delimiter,
-      ).length;
-      if (count > bestCount) {
-        best = delimiter;
-        bestCount = count;
-      }
-    }
-    return best;
-  }
-
-  DateTime? _parseCsvTimestamp(String raw) {
-    final String value = raw.trim();
-    if (value.isEmpty) {
-      return null;
-    }
-
-    final DateTime? iso = DateTime.tryParse(value);
-    if (iso != null) {
-      return iso;
-    }
-
-    final RegExp localPattern = RegExp(
-      r'^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$',
-    );
-    final Match? match = localPattern.firstMatch(value);
-    if (match == null) {
-      return null;
-    }
-
-    final int? day = int.tryParse(match.group(1)!);
-    final int? month = int.tryParse(match.group(2)!);
-    final int? year = int.tryParse(match.group(3)!);
-    final int? hour = int.tryParse(match.group(4)!);
-    final int? minute = int.tryParse(match.group(5)!);
-    final int second = int.tryParse(match.group(6) ?? '0') ?? 0;
-
-    if (day == null ||
-        month == null ||
-        year == null ||
-        hour == null ||
-        minute == null) {
-      return null;
-    }
-
-    return DateTime(year, month, day, hour, minute, second);
-  }
-
-  double? _parseCsvNumber(String raw) {
-    final String value = raw.trim();
-    if (value.isEmpty) {
-      return null;
-    }
-
-    final double? direct = double.tryParse(value);
-    if (direct != null) {
-      return direct;
-    }
-
-    if (value.contains(',') && !value.contains('.')) {
-      return double.tryParse(value.replaceAll(',', '.'));
-    }
-
-    return null;
-  }
-
-  Future<List<_LoggedSample>> _loadReplaySamplesFromCsv(File file) async {
-    final List<String> lines = await file.readAsLines();
-    if (lines.length <= 1) {
-      return <_LoggedSample>[];
-    }
-
-    final String delimiter = _detectCsvDelimiter(lines.first);
-    final List<String> header = _parseCsvFields(
-      lines.first,
-      delimiter: delimiter,
-    ).map(_normalizeCsvHeader).toList(growable: false);
-
-    int findHeaderIndex(List<String> keys) {
-      for (int i = 0; i < header.length; i++) {
-        final String normalized = _normalizeHeaderKey(header[i]);
-        if (keys.contains(normalized)) {
-          return i;
-        }
-      }
-      return -1;
-    }
-
-    final int timestampIndex = findHeaderIndex(<String>[
-      'timestamputc',
-      'timestamp',
-      'time',
-      'datetime',
-      'date',
-    ]);
-    final int sampleRateIndex = findHeaderIndex(<String>[
-      'sampleratehz',
-      'samplerate',
-      'fs',
-    ]);
-    final int samplesReadIndex = findHeaderIndex(<String>[
-      'samplesread',
-      'samples',
-      'n',
-    ]);
-    final int wavePayloadIndex = findHeaderIndex(<String>[
-      'wavepayloadjson',
-      'wavejson',
-      'wavepayload',
-    ]);
-    final int fftPayloadIndex = findHeaderIndex(<String>[
-      'fftpayloadjson',
-      'fftjson',
-      'fftpayload',
-    ]);
-    if (timestampIndex < 0) {
-      throw const FormatException(
-        'Thiếu cột thời gian (timestampUtc/timestamp/time) trong file log.',
-      );
-    }
-
-    final Map<String, int> channelIndexes = <String, int>{
-      for (final String channel in _channels)
-        channel: header.indexWhere(
-          (String value) => _normalizeHeaderKey(value) == channel.toLowerCase(),
-        ),
-    };
-
-    final List<_LoggedSample> samples = <_LoggedSample>[];
-    for (int lineIndex = 1; lineIndex < lines.length; lineIndex++) {
-      final String line = lines[lineIndex].trim();
-      if (line.isEmpty) {
-        continue;
-      }
-
-      final List<String> fields = _parseCsvFields(line, delimiter: delimiter);
-      if (timestampIndex >= fields.length) {
-        continue;
-      }
-
-      final DateTime? timestamp = _parseCsvTimestamp(fields[timestampIndex]);
-      if (timestamp == null) {
-        continue;
-      }
-
-      final Map<String, double> values = <String, double>{};
-      for (final MapEntry<String, int> entry in channelIndexes.entries) {
-        final int columnIndex = entry.value;
-        if (columnIndex < 0 || columnIndex >= fields.length) {
-          continue;
-        }
-        final double? parsed = _parseCsvNumber(fields[columnIndex]);
-        if (parsed != null) {
-          values[entry.key] = parsed;
-        }
-      }
-
-      if (values.isEmpty) {
-        continue;
-      }
-
-      samples.add(
-        _LoggedSample(
-          timestamp: timestamp.toLocal(),
-          values: values,
-          sampleRateHz: sampleRateIndex >= 0 && sampleRateIndex < fields.length
-              ? _parseCsvNumber(fields[sampleRateIndex])?.round()
-              : null,
-          samplesRead: samplesReadIndex >= 0 && samplesReadIndex < fields.length
-              ? _parseCsvNumber(fields[samplesReadIndex])?.round()
-              : null,
-          wavePayloadJson:
-              wavePayloadIndex >= 0 && wavePayloadIndex < fields.length
-              ? fields[wavePayloadIndex].trim()
-              : null,
-          fftPayloadJson:
-              fftPayloadIndex >= 0 && fftPayloadIndex < fields.length
-              ? fields[fftPayloadIndex].trim()
-              : null,
-        ),
-      );
-    }
-
-    samples.sort(
-      (_LoggedSample a, _LoggedSample b) => a.timestamp.compareTo(b.timestamp),
-    );
-    return samples;
-  }
-
   String _fileNameFromPath(String path) {
     final List<String> parts = path.split(RegExp(r'[\\/]'));
     return parts.isEmpty ? path : parts.last;
@@ -1702,6 +1842,33 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     final int targetMs = baseMs + positionMs.round();
     int low = 0;
     int high = _replaySamples.length - 1;
+
+    if (_replayTimeIndex.length >= 2) {
+      int idxLow = 0;
+      int idxHigh = _replayTimeIndex.length - 1;
+      int idxResult = 0;
+      while (idxLow <= idxHigh) {
+        final int mid = idxLow + ((idxHigh - idxLow) >> 1);
+        if (_replayTimeIndex[mid].timestampMsUtc <= targetMs) {
+          idxResult = mid;
+          idxLow = mid + 1;
+        } else {
+          idxHigh = mid - 1;
+        }
+      }
+
+      final _BinaryTimeIndexEntry lowerEntry = _replayTimeIndex[idxResult];
+      low = lowerEntry.sampleIndex.clamp(0, _replaySamples.length - 1);
+      if (idxResult + 1 < _replayTimeIndex.length) {
+        final _BinaryTimeIndexEntry upperEntry =
+            _replayTimeIndex[idxResult + 1];
+        high = (upperEntry.sampleIndex + _replayIndexStride).clamp(
+          low,
+          _replaySamples.length - 1,
+        );
+      }
+    }
+
     int result = -1;
 
     while (low <= high) {
@@ -1836,9 +2003,13 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     _stopReplayTimer();
     setState(() {
       _isReplayMode = false;
+      _isRunning = true;
+      _acquisitionService.setRunning(true);
       _isReplayPlaying = false;
       _isLoadingReplayFile = false;
       _replaySamples.clear();
+      _replayTimeIndex = <_BinaryTimeIndexEntry>[];
+      _replayIndexStride = 1;
       _clearReplayHistory();
       _replayFrameIndex = -1;
       _replayPositionMs = 0;
@@ -1855,13 +2026,14 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
 
     setState(() {
       _isLoadingReplayFile = true;
+      _replayLoadProgress = 0;
     });
 
     try {
       final Directory logDir = await _ensureDataLogDirectory();
       final FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: const <String>['csv'],
+        allowedExtensions: const <String>[_binaryLogExtension],
         initialDirectory: logDir.path,
         withData: false,
       );
@@ -1871,20 +2043,39 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         }
         setState(() {
           _isLoadingReplayFile = false;
+          _replayLoadProgress = 0;
         });
         return;
       }
 
       final String path = result.files.single.path!;
-      final List<_LoggedSample> samples = await _loadReplaySamplesFromCsv(
-        File(path),
-      );
+      double lastUiProgress = -1;
+      final _BinaryReplayLoadResult replayLoad =
+          await _loadReplaySamplesFromBinary(
+            File(path),
+            onProgress: (double progress) {
+              if (!mounted) {
+                return;
+              }
+              final double clamped = progress.clamp(0.0, 1.0).toDouble();
+              if (lastUiProgress >= 0 &&
+                  (clamped - lastUiProgress).abs() < 0.01) {
+                return;
+              }
+              lastUiProgress = clamped;
+              setState(() {
+                _replayLoadProgress = clamped;
+              });
+            },
+          );
+      final List<_LoggedSample> samples = replayLoad.samples;
       if (!mounted) {
         return;
       }
       if (samples.isEmpty) {
         setState(() {
           _isLoadingReplayFile = false;
+          _replayLoadProgress = 0;
           _eventLogs.insert(
             0,
             '[${DateTime.now().toLocal()}] Replay load failed: no usable samples in ${_fileNameFromPath(path)}',
@@ -1898,11 +2089,17 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       _stopReplayTimer();
       setState(() {
         _isReplayMode = true;
+        _isRunning = false;
+        _acquisitionService.setRunning(false);
         _isReplayPlaying = false;
         _isLoadingReplayFile = false;
-        _replaySamples
-          ..clear()
-          ..addAll(samples);
+        _replayLoadProgress = 0;
+        _replaySamples = samples;
+        _replayTimeIndex = List<_BinaryTimeIndexEntry>.from(
+          replayLoad.timeIndex,
+          growable: false,
+        );
+        _replayIndexStride = max(1, replayLoad.indexStride);
         _clearReplayHistory();
         _replayFrameIndex = -1;
         _replayPositionMs = 0;
@@ -1911,21 +2108,22 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         _replayFilePath = path;
         _eventLogs.insert(
           0,
-          '[${DateTime.now().toLocal()}] Loaded replay log: ${_fileNameFromPath(path)} (${samples.length} samples)',
+          '[${DateTime.now().toLocal()}] Loaded replay log: ${_fileNameFromPath(path)} (${samples.length} samples, full payload)',
         );
         _trimLogs();
         _setReplayPositionInternal(0);
       });
-      _showActionMessage('Đã nạp file log để phát lại.');
+      _showActionMessage('Đã nạp file log binary để phát lại.');
     } catch (error) {
       if (!mounted) {
         return;
       }
       final String message = error is FormatException
           ? error.message
-          : 'Định dạng file không đúng hoặc không thể đọc file.';
+          : 'Định dạng file binary không đúng hoặc không thể đọc file.';
       setState(() {
         _isLoadingReplayFile = false;
+        _replayLoadProgress = 0;
         _eventLogs.insert(
           0,
           '[${DateTime.now().toLocal()}] Replay load failed: $error',
@@ -1971,17 +2169,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       return '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
     }
     return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
-  }
-
-  String _formatLogTimestamp(DateTime timestamp) {
-    final DateTime local = timestamp.toLocal();
-    final String year = local.year.toString().padLeft(4, '0');
-    final String month = local.month.toString().padLeft(2, '0');
-    final String day = local.day.toString().padLeft(2, '0');
-    final String hour = local.hour.toString().padLeft(2, '0');
-    final String minute = local.minute.toString().padLeft(2, '0');
-    final String second = local.second.toString().padLeft(2, '0');
-    return '$day/$month/$year $hour:$minute:$second';
   }
 
   void _applyVoltageRange() {
@@ -2412,11 +2599,12 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   }
 
   void _onBridgeFftFrame(DaqFftFrame frame) {
-    if (!_isRunning || !mounted) return;
+    if (!_isRunning || !mounted || _isReplayMode) return;
     setState(() {
       _bridgeFftSampleRateHz = frame.sampleRateHz;
       _bridgeFftBinCount = frame.binCount;
       _bridgeFftSamplesRead = frame.samplesRead;
+      _bridgeFftCapturedAt = DateTime.now();
       for (int ch = 0; ch < frame.channelCount && ch < _channels.length; ch++) {
         _bridgeFftMags[_channels[ch]] = frame.channelMags(ch);
       }
@@ -2424,10 +2612,11 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   }
 
   void _onBridgeWaveFrame(DaqWaveFrame frame) {
-    if (!_isRunning || !mounted) return;
+    if (!_isRunning || !mounted || _isReplayMode) return;
     setState(() {
       _bridgeWaveSampleRateHz = frame.sampleRateHz;
       _bridgeWaveDecimStep = frame.decimStep;
+      _bridgeWaveCapturedAt = DateTime.now();
       for (int ch = 0; ch < frame.channelCount && ch < _channels.length; ch++) {
         _bridgeWaveSamples[_channels[ch]] = frame.channelSamples[ch];
       }
@@ -2435,7 +2624,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   }
 
   void _onAcquisitionSample(AcquisitionSample sample) {
-    if (!_isRunning || !mounted) {
+    if (!_isRunning || !mounted || _isReplayMode) {
       return;
     }
 
@@ -2998,26 +3187,14 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   }
 
   Widget _buildPanelsScreen(BoxConstraints constraints) {
-    final double horizontalPadding = constraints.maxWidth >= 1120 ? 16 : 12;
-
     return Padding(
-      padding: EdgeInsets.all(horizontalPadding),
-      child: Align(
-        alignment: Alignment.topCenter,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 980),
-          child: ListView(
-            children: <Widget>[
-              _buildDataLogSummaryCard(),
-              const SizedBox(height: 12),
-              SizedBox(height: 430, child: _buildDataLogPanel()),
-              const SizedBox(height: 12),
-              _buildPipelinePanel(),
-              const SizedBox(height: 12),
-              SizedBox(height: 220, child: _buildEventPanel()),
-            ],
-          ),
-        ),
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        children: <Widget>[
+          _buildSamplingInfoCard(),
+          const SizedBox(height: 10),
+          Expanded(child: _buildEventPanel()),
+        ],
       ),
     );
   }
@@ -3163,6 +3340,17 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     return _replaySamples[_replayFrameIndex];
   }
 
+  String? _resolvePayloadText({String? text, Uint8List? bytes}) {
+    final String? direct = text?.trim();
+    if (direct != null && direct.isNotEmpty) {
+      return direct;
+    }
+    if (bytes == null || bytes.isEmpty) {
+      return null;
+    }
+    return _decodePayloadBytes(bytes);
+  }
+
   Map<String, dynamic>? _decodePayloadObject(String? raw) {
     if (raw == null) {
       return null;
@@ -3190,7 +3378,10 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   })?
   _extractReplayWavePayload(_LoggedSample sample) {
     final Map<String, dynamic>? payload = _decodePayloadObject(
-      sample.wavePayloadJson,
+      _resolvePayloadText(
+        text: sample.wavePayloadJson,
+        bytes: sample.wavePayloadBytes,
+      ),
     );
     if (payload == null) {
       return null;
@@ -3259,7 +3450,10 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   })?
   _extractReplayFftPayload(_LoggedSample sample) {
     final Map<String, dynamic>? payload = _decodePayloadObject(
-      sample.fftPayloadJson,
+      _resolvePayloadText(
+        text: sample.fftPayloadJson,
+        bytes: sample.fftPayloadBytes,
+      ),
     );
     if (payload == null) {
       return null;
@@ -4332,7 +4526,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
             child: Row(
               children: <Widget>[
                 Tooltip(
-                  message: 'Chọn file log CSV để phát lại',
+                  message: 'Chọn file log binary để phát lại',
                   child: SizedBox(
                     width: replayButtonWidth,
                     child: FilledButton.tonalIcon(
@@ -4502,6 +4696,31 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
               ],
             ),
           ),
+          if (_isLoadingReplayFile) ...<Widget>[
+            const SizedBox(height: 8),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: LinearProgressIndicator(
+                    value: _replayLoadProgress.clamp(0.0, 1.0).toDouble(),
+                    minHeight: 6,
+                    borderRadius: BorderRadius.circular(8),
+                    backgroundColor: const Color(0xFFE3EAF3),
+                    color: const Color(0xFF0B4F8A),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '${(_replayLoadProgress * 100).clamp(0.0, 100.0).toStringAsFixed(0)}%',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF2E3C4A),
+                  ),
+                ),
+              ],
+            ),
+          ],
           const SizedBox(height: 2),
           if (_isReplayMode) ...<Widget>[
             Row(
@@ -4957,115 +5176,142 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
             _buildControlPanel(embedded: true),
           ],
         ),
-        _buildSettingsSectionCard(
-          icon: Icons.sensors,
-          title: 'Cảm biến và chế độ AI',
-          children: <Widget>[
-            Row(
+        LayoutBuilder(
+          builder: (BuildContext context, BoxConstraints constraints) {
+            final bool isWideLayout = constraints.maxWidth >= 980;
+
+            final Widget sensorCard = _buildSettingsSectionCard(
+              icon: Icons.sensors,
+              title: 'Cảm biến',
               children: <Widget>[
-                Expanded(
-                  child: DropdownButtonFormField<String>(
-                    value: _selectedAccelPresetId,
-                    decoration: const InputDecoration(
-                      labelText: 'Mẫu cảm biến',
-                    ),
-                    items: _accelPresets
-                        .map(
-                          (_AccelSensorPreset preset) =>
-                              DropdownMenuItem<String>(
-                                value: preset.id,
-                                child: Text(preset.label),
-                              ),
-                        )
-                        .toList(),
-                    onChanged: (String? value) {
-                      if (value == null) {
-                        return;
+                DropdownButtonFormField<String>(
+                  value: _selectedAccelPresetId,
+                  isExpanded: true,
+                  decoration: const InputDecoration(labelText: 'Mẫu cảm biến'),
+                  items: _accelPresets
+                      .map(
+                        (_AccelSensorPreset preset) => DropdownMenuItem<String>(
+                          value: preset.id,
+                          child: Text(preset.label),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (String? value) {
+                    if (value == null) {
+                      return;
+                    }
+                    setState(() {
+                      _selectedAccelPresetId = value;
+                      final _AccelSensorPreset selected =
+                          _selectedAccelPreset();
+                      if (!selected.isCustom) {
+                        _accelSensitivityController.text = selected
+                            .sensitivityMvPerG
+                            .toString();
                       }
-                      setState(() {
-                        _selectedAccelPresetId = value;
-                        final _AccelSensorPreset selected =
-                            _selectedAccelPreset();
-                        if (!selected.isCustom) {
-                          _accelSensitivityController.text = selected
-                              .sensitivityMvPerG
-                              .toString();
-                        }
-                      });
-                    },
+                    });
+                  },
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _accelSensitivityController,
+                  enabled: _selectedAccelPreset().isCustom,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                    signed: false,
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: 'Độ nhạy (mV/g)',
+                    hintText: '100',
                   ),
                 ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: _accelSensitivityController,
-              enabled: _selectedAccelPreset().isCustom,
-              keyboardType: const TextInputType.numberWithOptions(
-                decimal: true,
-                signed: false,
-              ),
-              decoration: const InputDecoration(
-                labelText: 'Độ nhạy (mV/g)',
-                hintText: '100',
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Độ nhạy đang dùng: ${_effectiveAccelSensitivityMvPerG().toStringAsFixed(2)} mV/g',
-            ),
-            const SizedBox(height: 14),
-            const Divider(height: 1),
-            const SizedBox(height: 14),
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: DropdownButtonFormField<BridgeAiChannelMode>(
-                    value: _aiChannelMode,
-                    decoration: const InputDecoration(
-                      labelText: 'Chế độ kênh AI',
+                const SizedBox(height: 8),
+                Text(
+                  'Độ nhạy đang dùng: ${_effectiveAccelSensitivityMvPerG().toStringAsFixed(2)} mV/g',
+                ),
+                if (isWideLayout) const Spacer(),
+                const SizedBox(height: 12),
+                _buildSettingsActionBar(
+                  onReset: _resetSensorDefaults,
+                  applyButtons: <Widget>[
+                    FilledButton.icon(
+                      onPressed: _applyAccelPresetAndSensitivity,
+                      icon: const Icon(Icons.sensors),
+                      label: const Text('Áp dụng mẫu cảm biến'),
                     ),
-                    items: const <DropdownMenuItem<BridgeAiChannelMode>>[
-                      DropdownMenuItem<BridgeAiChannelMode>(
-                        value: BridgeAiChannelMode.voltage,
-                        child: Text('DAQmxCreateAIVoltageChan'),
-                      ),
-                      DropdownMenuItem<BridgeAiChannelMode>(
-                        value: BridgeAiChannelMode.accel,
-                        child: Text('DAQmxCreateAIAccelChan'),
-                      ),
-                    ],
-                    onChanged: (BridgeAiChannelMode? mode) {
-                      if (mode == null) {
-                        return;
-                      }
-                      setState(() {
-                        _aiChannelMode = mode;
-                      });
-                    },
+                  ],
+                ),
+              ],
+            );
+
+            final Widget aiCard = _buildSettingsSectionCard(
+              icon: Icons.tune,
+              title: 'Chế độ AI',
+              children: <Widget>[
+                DropdownButtonFormField<BridgeAiChannelMode>(
+                  value: _aiChannelMode,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Chế độ kênh AI',
                   ),
+                  items: const <DropdownMenuItem<BridgeAiChannelMode>>[
+                    DropdownMenuItem<BridgeAiChannelMode>(
+                      value: BridgeAiChannelMode.voltage,
+                      child: Text('DAQmxCreateAIVoltageChan'),
+                    ),
+                    DropdownMenuItem<BridgeAiChannelMode>(
+                      value: BridgeAiChannelMode.accel,
+                      child: Text('DAQmxCreateAIAccelChan'),
+                    ),
+                  ],
+                  onChanged: (BridgeAiChannelMode? mode) {
+                    if (mode == null) {
+                      return;
+                    }
+                    setState(() {
+                      _aiChannelMode = mode;
+                    });
+                  },
+                ),
+                const SizedBox(height: 10),
+                Text('Hàm AI hiện tại: ${_aiModeLabel(_aiChannelMode)}'),
+                if (isWideLayout) const Spacer(),
+                const SizedBox(height: 12),
+                _buildSettingsActionBar(
+                  onReset: _resetAiModeDefault,
+                  applyButtons: <Widget>[
+                    FilledButton.icon(
+                      onPressed: _applyAiChannelMode,
+                      icon: const Icon(Icons.tune),
+                      label: const Text('Áp dụng chế độ AI'),
+                    ),
+                  ],
                 ),
               ],
-            ),
-            const SizedBox(height: 10),
-            Text('Hàm AI hiện tại: ${_aiModeLabel(_aiChannelMode)}'),
-            const SizedBox(height: 12),
-            _buildSettingsActionBar(
-              onReset: _resetSensorAiDefaults,
-              applyButtons: <Widget>[
-                FilledButton.icon(
-                  onPressed: _applyAccelPresetAndSensitivity,
-                  icon: const Icon(Icons.sensors),
-                  label: const Text('Áp dụng mẫu cảm biến'),
+            );
+
+            if (isWideLayout) {
+              return IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: <Widget>[
+                    Expanded(
+                      child: SizedBox(
+                        height: double.infinity,
+                        child: sensorCard,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: SizedBox(height: double.infinity, child: aiCard),
+                    ),
+                  ],
                 ),
-                FilledButton.icon(
-                  onPressed: _applyAiChannelMode,
-                  icon: const Icon(Icons.tune),
-                  label: const Text('Áp dụng chế độ AI'),
-                ),
-              ],
-            ),
-          ],
+              );
+            }
+
+            return Column(children: <Widget>[sensorCard, aiCard]);
+          },
         ),
         _buildSettingsSectionCard(
           icon: Icons.stacked_line_chart,
@@ -5279,20 +5525,14 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     unawaited(_saveSettings());
   }
 
-  void _resetSensorAiDefaults() {
+  void _resetSensorDefaults() {
     setState(() {
       _selectedAccelPresetId = 'EX607A01';
       _customAccelSensitivityMvPerG = 100.0;
-      _aiChannelMode = BridgeAiChannelMode.voltage;
 
       _accelSensitivityController.text = _customAccelSensitivityMvPerG
           .toString();
 
-      _bridgeArguments = _upsertBridgeFlag(
-        _bridgeArguments,
-        '--ai-mode',
-        _aiModeFlagValue(_aiChannelMode),
-      );
       _bridgeArguments = _upsertBridgeFlag(
         _bridgeArguments,
         '--accel-sens',
@@ -5302,7 +5542,28 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
 
       _eventLogs.insert(
         0,
-        '[${DateTime.now().toLocal()}] Đặt lại cài đặt cảm biến và chế độ AI về mặc định.',
+        '[${DateTime.now().toLocal()}] Đặt lại cài đặt cảm biến về mặc định.',
+      );
+      _trimLogs();
+    });
+
+    unawaited(_saveSettings());
+  }
+
+  void _resetAiModeDefault() {
+    setState(() {
+      _aiChannelMode = BridgeAiChannelMode.voltage;
+
+      _bridgeArguments = _upsertBridgeFlag(
+        _bridgeArguments,
+        '--ai-mode',
+        _aiModeFlagValue(_aiChannelMode),
+      );
+      _bridgeArgsController.text = _bridgeArguments;
+
+      _eventLogs.insert(
+        0,
+        '[${DateTime.now().toLocal()}] Đặt lại chế độ AI về mặc định.',
       );
       _trimLogs();
     });
@@ -5755,257 +6016,125 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     );
   }
 
-  Widget _buildPipelinePanel() {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: const <Widget>[
-            Text(
-              'Đường truyền hệ thống',
-              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-            ),
-            SizedBox(height: 10),
-            Text('Module cảm biến C Series -> Khung cDAQ -> NI-DAQmx C API'),
-            SizedBox(height: 4),
-            Text(
-              'Tiến trình adapter DAQ bên ngoài -> Bộ phân tích stdout Flutter',
-            ),
-            SizedBox(height: 4),
-            Text(
-              'Thư mục tham chiếu cdaq-9181-console chỉ mang tính hướng dẫn.',
-            ),
-            Text(
-              'Giao thức dòng dự kiến: DATA_MULTI,<rate>,<samplesRead>,<channelCount>,<rms0>...<rmsN>',
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDataLogSummaryCard() {
-    final _LoggedSample? latest = _dataLogs.isNotEmpty ? _dataLogs.first : null;
-    final String? strongestChannel = latest?.strongestChannel();
-    final double strongestValue = latest?.strongestValue() ?? 0;
+  Widget _buildEventPanel() {
+    final List<String> filteredLogs = _eventLogs
+        .where((String message) {
+          if (_selectedEventLogFilter == _EventLogFilter.all) {
+            return true;
+          }
+          final _EventLogLevel level = _eventLogLevel(message);
+          return (_selectedEventLogFilter == _EventLogFilter.info &&
+                  level == _EventLogLevel.info) ||
+              (_selectedEventLogFilter == _EventLogFilter.warning &&
+                  level == _EventLogLevel.warning) ||
+              (_selectedEventLogFilter == _EventLogFilter.danger &&
+                  level == _EventLogLevel.danger);
+        })
+        .toList(growable: false);
 
     return Card(
+      clipBehavior: Clip.antiAlias,
       child: Padding(
         padding: const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            Row(
+            const Row(
               children: <Widget>[
-                const Expanded(
-                  child: Text(
-                    'Dữ liệu đã log',
-                    style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-                  ),
+                Icon(Icons.event_note, size: 18, color: Color(0xFF005A9C)),
+                SizedBox(width: 8),
+                Text(
+                  'Nhật ký sự kiện',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
                 ),
               ],
             ),
             const SizedBox(height: 8),
             Wrap(
-              spacing: 12,
-              runSpacing: 12,
-              children: <Widget>[
-                _buildLogMetricChip('Số mẫu lưu', _dataLogs.length.toString()),
-                _buildLogMetricChip(
-                  'Trạng thái',
-                  _dataLoggingEnabled ? 'Đang ghi' : 'Tạm dừng',
-                ),
-                _buildLogMetricChip(
-                  'Mẫu mới nhất',
-                  latest == null
-                      ? 'Chưa có'
-                      : _formatLogTimestamp(latest.timestamp),
-                ),
-                _buildLogMetricChip(
-                  'Đỉnh gần nhất',
-                  strongestChannel == null
-                      ? 'Chưa có'
-                      : '$strongestChannel ${strongestValue.toStringAsFixed(3)} g',
-                ),
-              ],
+              spacing: 6,
+              runSpacing: 6,
+              children: _EventLogFilter.values.map((_EventLogFilter filter) {
+                final bool selected = _selectedEventLogFilter == filter;
+                final _EventLogLevel colorSource = switch (filter) {
+                  _EventLogFilter.all => _EventLogLevel.info,
+                  _EventLogFilter.info => _EventLogLevel.info,
+                  _EventLogFilter.warning => _EventLogLevel.warning,
+                  _EventLogFilter.danger => _EventLogLevel.danger,
+                };
+                final Color color = _eventLogLevelColor(colorSource);
+                return ChoiceChip(
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  label: Text(_eventLogFilterLabel(filter)),
+                  avatar: Icon(
+                    _eventLogFilterIcon(filter),
+                    size: 14,
+                    color: selected ? color : const Color(0xFF6B7A89),
+                  ),
+                  selected: selected,
+                  onSelected: (_) {
+                    setState(() {
+                      _selectedEventLogFilter = filter;
+                    });
+                  },
+                );
+              }).toList(),
             ),
             const SizedBox(height: 12),
-            Row(
-              children: <Widget>[
-                FilledButton.icon(
-                  onPressed: _dataLogs.isEmpty
-                      ? null
-                      : () => unawaited(_clearDataLogs()),
-                  icon: const Icon(Icons.delete_outline),
-                  label: const Text('Xóa log'),
-                ),
-                const SizedBox(width: 10),
-                Text(
-                  'Màn hình giữ $_maxRecentDataLogs mẫu gần nhất, archive được ghi ra file CSV theo ngày.',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Color(0xFF5E6A79),
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Điều khiển ghi dữ liệu đã được chuyển lên màn hình chính.',
-              style: TextStyle(fontSize: 12, color: Color(0xFF5E6A79)),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildLogMetricChip(String label, String value) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF4F8FC),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFD7E2EC)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          Text(
-            label,
-            style: const TextStyle(
-              fontSize: 11,
-              color: Color(0xFF6A7888),
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            value,
-            style: const TextStyle(
-              fontSize: 13,
-              color: Color(0xFF203040),
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDataLogPanel() {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            const Text(
-              'Xem lại dữ liệu đã log',
-              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-            ),
-            const SizedBox(height: 8),
             Expanded(
-              child: _dataLogs.isEmpty
-                  ? const Center(
+              child: filteredLogs.isEmpty
+                  ? Center(
                       child: Text(
-                        'Chưa có dữ liệu log. Bật ghi dữ liệu để lưu các mẫu mới.',
+                        _eventLogs.isEmpty
+                            ? 'Chưa có sự kiện'
+                            : 'Không có sự kiện phù hợp bộ lọc',
                       ),
                     )
                   : ListView.separated(
-                      itemCount: _dataLogs.length,
-                      separatorBuilder: (_, __) => const Divider(height: 8),
+                      itemCount: filteredLogs.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
                       itemBuilder: (BuildContext context, int index) {
-                        final _LoggedSample sample = _dataLogs[index];
-                        final String? strongestChannel = sample
-                            .strongestChannel();
-                        final double strongestValue = sample.strongestValue();
-                        final List<MapEntry<String, double>> sortedValues =
-                            sample.values.entries.toList()..sort(
-                              (
-                                MapEntry<String, double> a,
-                                MapEntry<String, double> b,
-                              ) => a.key.compareTo(b.key),
-                            );
+                        final String message = filteredLogs[index];
+                        final _EventLogLevel level = _eventLogLevel(message);
+                        final Color levelColor = _eventLogLevelColor(level);
 
-                        return ExpansionTile(
-                          tilePadding: EdgeInsets.zero,
-                          childrenPadding: const EdgeInsets.only(bottom: 8),
-                          title: Text(
-                            _formatLogTimestamp(sample.timestamp),
-                            style: const TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w700,
+                        return Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 8,
+                          ),
+                          decoration: BoxDecoration(
+                            color: levelColor.withValues(alpha: 0.08),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: levelColor.withValues(alpha: 0.24),
                             ),
                           ),
-                          subtitle: Text(
-                            strongestChannel == null
-                                ? 'Không có dữ liệu kênh'
-                                : 'Đỉnh: $strongestChannel ${strongestValue.toStringAsFixed(3)} g • ${sample.values.length} kênh',
-                            style: const TextStyle(fontSize: 12.5),
-                          ),
-                          children: <Widget>[
-                            Padding(
-                              padding: const EdgeInsets.only(bottom: 8),
-                              child: Row(
-                                children: <Widget>[
-                                  Text(
-                                    'Sample rate: ${sample.sampleRateHz ?? '-'} Hz',
-                                    style: const TextStyle(fontSize: 12),
-                                  ),
-                                  const SizedBox(width: 16),
-                                  Text(
-                                    'Samples/read: ${sample.samplesRead ?? '-'}',
-                                    style: const TextStyle(fontSize: 12),
-                                  ),
-                                ],
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: <Widget>[
+                              Icon(
+                                _eventLogLevelIcon(level),
+                                size: 15,
+                                color: levelColor,
                               ),
-                            ),
-                            Wrap(
-                              spacing: 8,
-                              runSpacing: 8,
-                              children: sortedValues.map((
-                                MapEntry<String, double> entry,
-                              ) {
-                                return Container(
-                                  width: 110,
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 8,
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  message,
+                                  style: TextStyle(
+                                    fontSize: 12.5,
+                                    height: 1.3,
+                                    color: const Color(0xFF2E3C4A),
+                                    fontWeight: level == _EventLogLevel.danger
+                                        ? FontWeight.w600
+                                        : FontWeight.w500,
                                   ),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFFF7FAFD),
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(
-                                      color: const Color(0xFFD8E2EC),
-                                    ),
-                                  ),
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: <Widget>[
-                                      Text(
-                                        entry.key,
-                                        style: const TextStyle(
-                                          fontSize: 11,
-                                          fontWeight: FontWeight.w700,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 2),
-                                      Text(
-                                        '${entry.value.toStringAsFixed(3)} g',
-                                        style: const TextStyle(fontSize: 12.5),
-                                      ),
-                                    ],
-                                  ),
-                                );
-                              }).toList(),
-                            ),
-                          ],
+                                ),
+                              ),
+                            ],
+                          ),
                         );
                       },
                     ),
@@ -6016,35 +6145,74 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     );
   }
 
-  Widget _buildEventPanel() {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            const Text(
-              'Nhật ký sự kiện',
-              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-            ),
-            const SizedBox(height: 8),
-            Expanded(
-              child: _eventLogs.isEmpty
-                  ? const Center(child: Text('Chưa có sự kiện'))
-                  : ListView.separated(
-                      itemCount: _eventLogs.length,
-                      separatorBuilder: (_, __) => const Divider(height: 8),
-                      itemBuilder: (BuildContext context, int index) {
-                        return Text(
-                          _eventLogs[index],
-                          style: const TextStyle(fontSize: 12.5),
-                        );
-                      },
-                    ),
-            ),
-          ],
-        ),
-      ),
-    );
+  _EventLogLevel _eventLogLevel(String message) {
+    final String normalized = message.toLowerCase();
+    if (normalized.contains('error') ||
+        normalized.contains('failed') ||
+        normalized.contains('bridge exited') ||
+        normalized.contains('status code') ||
+        normalized.contains('exception') ||
+        normalized.contains('timeout') ||
+        normalized.contains('khong hop le') ||
+        normalized.contains('invalid')) {
+      return _EventLogLevel.danger;
+    }
+    if (normalized.contains('warning') ||
+        normalized.contains('fallback') ||
+        normalized.contains('reconnect') ||
+        normalized.contains('disconnect') ||
+        normalized.contains('threshold') ||
+        normalized.contains('unsupported')) {
+      return _EventLogLevel.warning;
+    }
+    return _EventLogLevel.info;
+  }
+
+  String _eventLogFilterLabel(_EventLogFilter filter) {
+    switch (filter) {
+      case _EventLogFilter.all:
+        return 'Tất cả';
+      case _EventLogFilter.info:
+        return 'Info';
+      case _EventLogFilter.warning:
+        return 'Warning';
+      case _EventLogFilter.danger:
+        return 'Danger';
+    }
+  }
+
+  IconData _eventLogFilterIcon(_EventLogFilter filter) {
+    switch (filter) {
+      case _EventLogFilter.all:
+        return Icons.filter_alt_outlined;
+      case _EventLogFilter.info:
+        return Icons.info_outline;
+      case _EventLogFilter.warning:
+        return Icons.warning_amber_rounded;
+      case _EventLogFilter.danger:
+        return Icons.error_outline;
+    }
+  }
+
+  Color _eventLogLevelColor(_EventLogLevel level) {
+    switch (level) {
+      case _EventLogLevel.info:
+        return const Color(0xFF0B4F8A);
+      case _EventLogLevel.warning:
+        return const Color(0xFFE4A100);
+      case _EventLogLevel.danger:
+        return const Color(0xFFC0392B);
+    }
+  }
+
+  IconData _eventLogLevelIcon(_EventLogLevel level) {
+    switch (level) {
+      case _EventLogLevel.info:
+        return Icons.info_outline;
+      case _EventLogLevel.warning:
+        return Icons.warning_amber_rounded;
+      case _EventLogLevel.danger:
+        return Icons.error_outline;
+    }
   }
 }
