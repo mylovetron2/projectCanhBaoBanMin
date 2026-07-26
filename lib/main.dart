@@ -1249,13 +1249,13 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   }
 
   String _dataLogFileName(DateTime timestamp) {
-    final DateTime local = timestamp.toLocal();
-    final String year = local.year.toString().padLeft(4, '0');
-    final String month = local.month.toString().padLeft(2, '0');
-    final String day = local.day.toString().padLeft(2, '0');
-    final String hour = local.hour.toString().padLeft(2, '0');
-    final String minute = local.minute.toString().padLeft(2, '0');
-    final String second = local.second.toString().padLeft(2, '0');
+    final DateTime localTime = timestamp.toLocal();
+    final String year = localTime.year.toString().padLeft(4, '0');
+    final String month = localTime.month.toString().padLeft(2, '0');
+    final String day = localTime.day.toString().padLeft(2, '0');
+    final String hour = localTime.hour.toString().padLeft(2, '0');
+    final String minute = localTime.minute.toString().padLeft(2, '0');
+    final String second = localTime.second.toString().padLeft(2, '0');
     final String timePart = <String>[hour, 'h', minute, 'm', second].join();
     return 'samples_$year-$month-$day-$timePart.csv';
   }
