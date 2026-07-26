@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 
@@ -91,6 +92,7 @@ class DaqBlockFrame {
     required this.channelRmsValues,
     required this.magnitudes,
     required this.channelSamples,
+    this.rawInterleavedSamples,
   });
 
   final int sampleRateHz;
@@ -101,6 +103,7 @@ class DaqBlockFrame {
   final List<double> channelRmsValues;
   final List<double> magnitudes;
   final List<List<double>> channelSamples;
+  final Float32List? rawInterleavedSamples;
 
   DaqFftFrame toFftFrame() {
     return DaqFftFrame(
@@ -138,6 +141,10 @@ class DaqBridgeClient {
   static const EventChannel _nativeEventChannel = EventChannel(
     'mine_alert/daq_bridge_events',
   );
+  static const int _blockBinaryMagic = 0x314b4c42; // "BLK1" little-endian
+  static const int _blockBinaryVersion = 1;
+  static const int _blockBinaryHeaderU32Count = 9;
+  static const int _blockBinaryFlagHasRawInterleaved = 1;
 
   final StreamController<DaqFrame> _frameController =
       StreamController<DaqFrame>.broadcast();
@@ -559,6 +566,105 @@ class DaqBridgeClient {
     _emitStatus(line);
   }
 
+  void _parseBinaryEvent(Uint8List payload) {
+    final int headerBytes = _blockBinaryHeaderU32Count * 4;
+    if (payload.lengthInBytes < headerBytes) {
+      _emitStatus('Malformed BLOCK_BIN: payload too small');
+      return;
+    }
+
+    final ByteData bytes = ByteData.sublistView(payload);
+    final int magic = bytes.getUint32(0, Endian.little);
+    final int version = bytes.getUint32(4, Endian.little);
+    if (magic != _blockBinaryMagic || version != _blockBinaryVersion) {
+      _emitStatus('Unknown binary bridge payload (magic/version mismatch)');
+      return;
+    }
+
+    final int sampleRateHz = bytes.getUint32(8, Endian.little);
+    final int samplesRead = bytes.getUint32(12, Endian.little);
+    final int channelCount = bytes.getUint32(16, Endian.little);
+    final int binCount = bytes.getUint32(20, Endian.little);
+    final int decimStep = bytes.getUint32(24, Endian.little);
+    final int outCount = bytes.getUint32(28, Endian.little);
+    final int flags = bytes.getUint32(32, Endian.little);
+
+    if (sampleRateHz <= 0 ||
+        samplesRead <= 0 ||
+        channelCount <= 0 ||
+        binCount <= 0 ||
+        decimStep <= 0 ||
+        outCount <= 0) {
+      _emitStatus('Invalid BLOCK_BIN header values');
+      return;
+    }
+
+    final int rmsCount = channelCount;
+    final int fftCount = channelCount * binCount;
+    final int waveCount = channelCount * outCount;
+    final bool hasRaw = (flags & _blockBinaryFlagHasRawInterleaved) != 0;
+    final int rawCount = hasRaw ? channelCount * samplesRead : 0;
+    final int totalFloats = rmsCount + fftCount + waveCount + rawCount;
+    final int expectedBytes = headerBytes + totalFloats * 4;
+    if (payload.lengthInBytes != expectedBytes) {
+      _emitStatus(
+        'BLOCK_BIN size mismatch: got ${payload.lengthInBytes}, expected $expectedBytes',
+      );
+      return;
+    }
+
+    int offset = headerBytes;
+    final List<double> rmsValues = List<double>.filled(rmsCount, 0.0);
+    for (int i = 0; i < rmsCount; i++) {
+      rmsValues[i] = bytes.getFloat32(offset, Endian.little).toDouble();
+      offset += 4;
+    }
+
+    final List<double> mags = List<double>.filled(fftCount, 0.0);
+    for (int i = 0; i < fftCount; i++) {
+      mags[i] = bytes.getFloat32(offset, Endian.little).toDouble();
+      offset += 4;
+    }
+
+    final List<List<double>> channelSamples = List<List<double>>.generate(
+      channelCount,
+      (_) => List<double>.filled(outCount, 0.0),
+    );
+    for (int ch = 0; ch < channelCount; ch++) {
+      for (int i = 0; i < outCount; i++) {
+        channelSamples[ch][i] = bytes
+            .getFloat32(offset, Endian.little)
+            .toDouble();
+        offset += 4;
+      }
+    }
+
+    Float32List? rawInterleaved;
+    if (hasRaw) {
+      rawInterleaved = Float32List(rawCount);
+      for (int i = 0; i < rawCount; i++) {
+        rawInterleaved[i] = bytes.getFloat32(offset, Endian.little);
+        offset += 4;
+      }
+    }
+
+    final DaqBlockFrame block = DaqBlockFrame(
+      sampleRateHz: sampleRateHz,
+      samplesRead: samplesRead,
+      channelCount: channelCount,
+      binCount: binCount,
+      decimStep: decimStep,
+      channelRmsValues: rmsValues,
+      magnitudes: mags,
+      channelSamples: channelSamples,
+      rawInterleavedSamples: rawInterleaved,
+    );
+
+    if (!_blockFrameController.isClosed) {
+      _blockFrameController.add(block);
+    }
+  }
+
   void _disposeProcessOnly() {
     unawaited(_stdoutSub?.cancel());
     unawaited(_stderrSub?.cancel());
@@ -574,6 +680,10 @@ class DaqBridgeClient {
 
     _nativeEventSub = _nativeEventChannel.receiveBroadcastStream().listen(
       (dynamic event) {
+        if (event is Uint8List) {
+          _parseBinaryEvent(event);
+          return;
+        }
         if (event is String) {
           _handleNativeEvent(event);
         } else {

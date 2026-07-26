@@ -72,6 +72,11 @@ class DataAcquisitionService {
   int _mockSampleRateHz = 10000;
   int _mockSamplesPerRead = 1000;
   int _mockSampleCursor = 0;
+  int _mockBlockCounter = 0;
+
+  // FFT in demo mode is CPU-heavy. Updating every few blocks keeps UI smooth
+  // while preserving responsive RMS/Wave displays.
+  static const int _mockFftEveryNBlocks = 3;
 
   Stream<AcquisitionSample> get samples => _sampleController.stream;
   Stream<String> get status => _statusController.stream;
@@ -151,6 +156,10 @@ class DataAcquisitionService {
       return;
     }
 
+    _mockBlockCounter += 1;
+    final bool shouldEmitMockFft =
+        (_mockBlockCounter % _mockFftEveryNBlocks) == 0;
+
     final int sampleRateHz = _mockSampleRateHz;
     final int samplesPerRead = _mockSamplesPerRead;
     final int fftSize = DaqFftFrame.nextPow2(samplesPerRead);
@@ -214,15 +223,27 @@ class DataAcquisitionService {
       }
       waveChannelSamples[i] = decimated;
 
-      final List<double> padded = List<double>.filled(fftSize, 0.0);
-      for (int n = 0; n < samplesPerRead; n++) {
-        padded[n] = channelBlock[n];
+      if (shouldEmitMockFft) {
+        final List<double> padded = List<double>.filled(fftSize, 0.0);
+        for (int n = 0; n < samplesPerRead; n++) {
+          padded[n] = channelBlock[n];
+        }
+        final List<double> mags = _fftMagnitudes(padded);
+        flatFftMagnitudes.addAll(mags);
       }
-      final List<double> mags = _fftMagnitudes(padded);
-      flatFftMagnitudes.addAll(mags);
     }
 
     _mockSampleCursor += samplesPerRead;
+
+    final DaqFftFrame? mockFftFrame = shouldEmitMockFft
+        ? DaqFftFrame(
+            sampleRateHz: sampleRateHz,
+            samplesRead: samplesPerRead,
+            channelCount: _channels.length,
+            binCount: fftSize ~/ 2,
+            magnitudes: flatFftMagnitudes,
+          )
+        : null;
 
     _sampleController.add(
       AcquisitionSample(
@@ -230,13 +251,7 @@ class DataAcquisitionService {
         rawRmsVolts: rawRmsVolts,
         sampleRateHz: sampleRateHz,
         samplesRead: samplesPerRead,
-        fftFrame: DaqFftFrame(
-          sampleRateHz: sampleRateHz,
-          samplesRead: samplesPerRead,
-          channelCount: _channels.length,
-          binCount: fftSize ~/ 2,
-          magnitudes: flatFftMagnitudes,
-        ),
+        fftFrame: mockFftFrame,
         waveFrame: DaqWaveFrame(
           sampleRateHz: sampleRateHz,
           samplesRead: samplesPerRead,
@@ -259,16 +274,8 @@ class DataAcquisitionService {
       );
     }
 
-    if (!_fftController.isClosed) {
-      _fftController.add(
-        DaqFftFrame(
-          sampleRateHz: sampleRateHz,
-          samplesRead: samplesPerRead,
-          channelCount: _channels.length,
-          binCount: fftSize ~/ 2,
-          magnitudes: flatFftMagnitudes,
-        ),
-      );
+    if (mockFftFrame != null && !_fftController.isClosed) {
+      _fftController.add(mockFftFrame);
     }
   }
 

@@ -10,6 +10,7 @@
 #include <NIDAQmx.h>
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -53,6 +54,7 @@ class DaqNativeBridge {
   void RunStreamWorker(StreamConfig config);
   int RunStreamRead(const StreamConfig& config);
   void EmitLine(const std::string& line);
+  void EmitBinary(const std::vector<uint8_t>& bytes);
   void EmitBridgeStopped(int exit_code);
 
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>

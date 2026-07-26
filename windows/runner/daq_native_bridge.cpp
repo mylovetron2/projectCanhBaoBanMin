@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cctype>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <iomanip>
@@ -28,6 +29,9 @@ namespace {
 
 constexpr char kMethodChannelName[] = "mine_alert/daq_bridge_method";
 constexpr char kEventChannelName[] = "mine_alert/daq_bridge_events";
+constexpr uint32_t kBlockBinaryMagic = 0x314b4c42;  // "BLK1" little-endian
+constexpr uint32_t kBlockBinaryVersion = 1;
+constexpr uint32_t kBlockBinaryFlagHasRawInterleaved = 1u;
 
 struct DaqmxApi {
   using CreateTaskFn = decltype(&DAQmxCreateTask);
@@ -280,6 +284,16 @@ void ComputeFftMagnitudes(const double* input, int samples_read, int fft_n,
     (*out)[static_cast<size_t>(k)] =
         std::sqrt(re[k] * re[k] + im[k] * im[k]) / half;
   }
+}
+
+void AppendU32(std::vector<uint8_t>* out, uint32_t value) {
+  const uint8_t* src = reinterpret_cast<const uint8_t*>(&value);
+  out->insert(out->end(), src, src + sizeof(uint32_t));
+}
+
+void AppendF32(std::vector<uint8_t>* out, float value) {
+  const uint8_t* src = reinterpret_cast<const uint8_t*>(&value);
+  out->insert(out->end(), src, src + sizeof(float));
 }
 
 }  // namespace
@@ -556,19 +570,10 @@ int DaqNativeBridge::RunStreamRead(const StreamConfig& config) {
 
     std::vector<double> ch_input(static_cast<size_t>(samples_read));
     std::vector<double> mags;
+    std::vector<float> fft_channel_major(
+        static_cast<size_t>(channel_count) * static_cast<size_t>(bins_out),
+        0.0f);
 
-    std::ostringstream line;
-    line << "BLOCK_MULTI," << static_cast<int>(config.sample_rate_hz) << ","
-         << samples_read << "," << channel_count << "," << bins_out << ","
-         << kDecimStep;
-    line << std::fixed << std::setprecision(6);
-
-    // Append RMS values first, one value per channel.
-    for (uInt32 ch = 0; ch < channel_count; ++ch) {
-      line << "," << rms_by_channel[static_cast<size_t>(ch)];
-    }
-
-    // Append FFT magnitudes in channel-major layout.
     for (uInt32 ch = 0; ch < channel_count; ++ch) {
       for (int32 i = 0; i < samples_read; ++i) {
         ch_input[static_cast<size_t>(i)] =
@@ -576,18 +581,55 @@ int DaqNativeBridge::RunStreamRead(const StreamConfig& config) {
       }
       ComputeFftMagnitudes(ch_input.data(), samples_read, fft_n, &mags);
       for (int b = 0; b < bins_out; ++b) {
-        line << "," << mags[static_cast<size_t>(b)];
+        const size_t idx = static_cast<size_t>(ch) * static_cast<size_t>(bins_out) +
+                           static_cast<size_t>(b);
+        fft_channel_major[idx] = static_cast<float>(mags[static_cast<size_t>(b)]);
       }
     }
 
-    // Append decimated waveform samples in channel-major layout.
+    const uint32_t out_count = static_cast<uint32_t>(
+        (samples_read + kDecimStep - 1) / kDecimStep);
+
+    std::vector<uint8_t> payload;
+    payload.reserve(
+        9 * sizeof(uint32_t) +
+        static_cast<size_t>(channel_count) * sizeof(float) +
+        fft_channel_major.size() * sizeof(float) +
+        static_cast<size_t>(channel_count) * out_count * sizeof(float) +
+        samples.size() * sizeof(float));
+
+    AppendU32(&payload, kBlockBinaryMagic);
+    AppendU32(&payload, kBlockBinaryVersion);
+    AppendU32(&payload, static_cast<uint32_t>(config.sample_rate_hz));
+    AppendU32(&payload, static_cast<uint32_t>(samples_read));
+    AppendU32(&payload, static_cast<uint32_t>(channel_count));
+    AppendU32(&payload, static_cast<uint32_t>(bins_out));
+    AppendU32(&payload, static_cast<uint32_t>(kDecimStep));
+    AppendU32(&payload, out_count);
+    AppendU32(&payload, kBlockBinaryFlagHasRawInterleaved);
+
+    for (uInt32 ch = 0; ch < channel_count; ++ch) {
+      AppendF32(&payload, static_cast<float>(rms_by_channel[static_cast<size_t>(ch)]));
+    }
+
+    for (float value : fft_channel_major) {
+      AppendF32(&payload, value);
+    }
+
     for (uInt32 ch = 0; ch < channel_count; ++ch) {
       for (int32 i = 0; i < samples_read; i += kDecimStep) {
-        line << "," << samples[static_cast<size_t>(i) * channel_count + ch];
+        const float value = static_cast<float>(
+            samples[static_cast<size_t>(i) * channel_count + ch]);
+        AppendF32(&payload, value);
       }
     }
 
-    EmitLine(line.str());
+    // Raw block in DAQ scan-order (interleaved by channel) for direct downstream use.
+    for (float64 value : samples) {
+      AppendF32(&payload, static_cast<float>(value));
+    }
+
+    EmitBinary(payload);
   }
 
 Error:
@@ -629,6 +671,13 @@ void DaqNativeBridge::EmitLine(const std::string& line) {
   std::lock_guard<std::mutex> lock(event_sink_mutex_);
   if (event_sink_ != nullptr) {
     event_sink_->Success(flutter::EncodableValue(line));
+  }
+}
+
+void DaqNativeBridge::EmitBinary(const std::vector<uint8_t>& bytes) {
+  std::lock_guard<std::mutex> lock(event_sink_mutex_);
+  if (event_sink_ != nullptr) {
+    event_sink_->Success(flutter::EncodableValue(bytes));
   }
 }
 

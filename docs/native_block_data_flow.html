@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Native Data Flow - BLOCK_MULTI</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --card: #ffffff;
+      --text: #1f2a37;
+      --muted: #526174;
+      --line: #d8e3ef;
+      --accent: #0b4f8a;
+      --accent-2: #1f7a8c;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 24px;
+      background: radial-gradient(circle at 8% 10%, #eef5ff 0, var(--bg) 48%),
+                  radial-gradient(circle at 92% 90%, #eafaf5 0, var(--bg) 40%);
+      color: var(--text);
+      font-family: "Segoe UI", "Noto Sans", Arial, sans-serif;
+      line-height: 1.45;
+    }
+
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+      display: grid;
+      gap: 16px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px 18px;
+      box-shadow: 0 4px 20px rgba(11, 79, 138, 0.06);
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+      color: var(--accent);
+    }
+
+    h2 {
+      margin: 0 0 10px;
+      font-size: 18px;
+      color: var(--accent-2);
+    }
+
+    p {
+      margin: 6px 0;
+      color: var(--muted);
+    }
+
+    code {
+      background: #eef3f9;
+      border: 1px solid #dce6f1;
+      border-radius: 6px;
+      padding: 1px 6px;
+      color: #15334d;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    th, td {
+      text-align: left;
+      border-bottom: 1px solid var(--line);
+      padding: 8px 6px;
+      vertical-align: top;
+    }
+
+    th {
+      color: #1d3f5b;
+      font-weight: 700;
+      background: #f4f8fd;
+    }
+
+    .formula {
+      background: #f4f9ff;
+      border: 1px solid #d7e6f6;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-family: Consolas, "Courier New", monospace;
+      color: #144064;
+      margin-top: 8px;
+      overflow-x: auto;
+    }
+
+    .small {
+      font-size: 13px;
+      color: #5d6b7e;
+    }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <section class="card">
+      <h1>Native Data Flow (BLOCK_MULTI)</h1>
+      <p>
+        So do khoi luong du lieu Native theo file hien tai:
+        <code>startBridge -> RunStreamRead -> Compute -> BLOCK emit</code>.
+      </p>
+      <p class="small">
+        Nguon: windows/runner/daq_native_bridge.cpp, lib/daq_bridge_client.dart
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>1) So do khoi chinh</h2>
+      <pre class="mermaid">
+flowchart LR
+    A[Flutter MethodChannel startBridge] --> B[HandleMethodCall]
+    B --> C[StartBridge]
+    C --> D[ParseStartArguments]
+    D --> E[worker thread starts RunStreamWorker]
+    E --> F[RunStreamRead loop]
+
+    F --> G[DAQmxReadAnalogF64 raw block]
+    G --> H[Compute RMS per channel]
+    G --> I[Compute FFT per channel]
+    G --> J[Decimate Wave step 5]
+
+    H --> K[Build BLOCK_MULTI string]
+    I --> K
+    J --> K
+
+    K --> L[EmitLine to EventChannel]
+    L --> M[Dart _parseLine]
+    M --> N[parse BLOCK_MULTI]
+    N --> O[DaqBlockFrame]
+    O --> P[DataAcquisitionService onBridgeBlockFrame]
+    P --> Q[AcquisitionSample with fft wave rms]
+    Q --> R[UI setState one time]
+      </pre>
+    </section>
+
+    <section class="card">
+      <h2>2) Payload BLOCK_MULTI hien tai</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Thu tu</th>
+            <th>Thanh phan</th>
+            <th>So luong</th>
+            <th>Mo ta</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1</td>
+            <td>Header</td>
+            <td>6 fields</td>
+            <td>BLOCK_MULTI, sampleRateHz, samplesRead, channelCount, binCount, decimStep</td>
+          </tr>
+          <tr>
+            <td>2</td>
+            <td>RMS</td>
+            <td>C</td>
+            <td>Gia tri RMS cho tung kenh</td>
+          </tr>
+          <tr>
+            <td>3</td>
+            <td>FFT</td>
+            <td>C x B</td>
+            <td>Magnitude FFT theo channel-major</td>
+          </tr>
+          <tr>
+            <td>4</td>
+            <td>Wave</td>
+            <td>C x O</td>
+            <td>Mau song da decimate, channel-major</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="formula">
+Total fields = 6 + C + (C x B) + (C x O)
+
+O = ceil(samplesRead / decimStep)
+      </div>
+      <p class="small">
+        C = channelCount, B = binCount, O = outCount.
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>3) Vi sao chuoi dai gay nang</h2>
+      <p>Native phai format hang nghin so thanh text moi block, sau do Dart phai split va parse lai tung token.</p>
+      <p>CPU + cap phat bo nho tang, de thay giat khi resize/minimize.</p>
+    </section>
+
+    <section class="card">
+      <h2>4) Sequence theo thread</h2>
+      <pre class="mermaid">
+sequenceDiagram
+    autonumber
+    participant UI as Flutter UI thread
+    participant NMain as Native main thread
+    participant NWorker as Native worker thread
+    participant DAQ as NI-DAQmx driver
+    participant Ev as EventChannel
+    participant Dart as Dart parser/service
+
+    UI->>NMain: MethodChannel.startBridge(args)
+    NMain->>NMain: HandleMethodCall + ParseStartArguments
+    NMain->>NWorker: Start RunStreamWorker/RunStreamRead
+
+    loop Moi block du lieu
+        NWorker->>DAQ: DAQmxReadAnalogF64(samplesPerRead)
+        DAQ-->>NWorker: raw interleaved samples
+
+        NWorker->>NWorker: Compute RMS per channel
+        NWorker->>NWorker: Compute FFT per channel
+        NWorker->>NWorker: Decimate Wave(step=5)
+        NWorker->>NWorker: Build BLOCK_MULTI string
+
+        NWorker->>Ev: EmitLine(BLOCK_MULTI,...)
+        Ev-->>Dart: String event
+        Dart->>Dart: split(',') + parse doubles
+        Dart->>Dart: Build DaqBlockFrame
+        Dart-->>UI: AcquisitionSample(fft+wave+rms)
+        UI->>UI: setState() + chart render
+    end
+
+    UI->>NMain: MethodChannel.stopBridge()
+    NMain->>NWorker: stop_requested=true
+    NWorker-->>NMain: thread join
+      </pre>
+      <p class="small">
+        Giai doan ton CPU nhieu nhat thuong la: FFT tinh toan trong Native va split/parse chuoi lon trong Dart.
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>5) Diem nghe theo giai doan</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Giai doan</th>
+            <th>Chi phi chinh</th>
+            <th>Trieu chung</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>DAQ read</td>
+            <td>Cho block I/O tu driver</td>
+            <td>Do tre block tang khi cau hinh lay mau lon</td>
+          </tr>
+          <tr>
+            <td>Native compute</td>
+            <td>RMS + FFT tren C kenh</td>
+            <td>CPU Native tang, nhat la khi B lon</td>
+          </tr>
+          <tr>
+            <td>Serialize text</td>
+            <td>ostringstream format rat nhieu so</td>
+            <td>Frame bridge day, line rat dai</td>
+          </tr>
+          <tr>
+            <td>Dart parse</td>
+            <td>split + double.tryParse hang nghin token</td>
+            <td>UI khung/giat luc resize</td>
+          </tr>
+          <tr>
+            <td>Chart render</td>
+            <td>Rebuild/repaint nhieu panel</td>
+            <td>FPS giam khi cua so thay doi kich thuoc</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, theme: "default", securityLevel: "loose" });
+  </script>
+</body>
+</html>
