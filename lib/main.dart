@@ -369,6 +369,9 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   bool _isConnected = false;
   bool _useBridge = true;
   bool _dataLoggingEnabled = true;
+  bool _dataLoggingBlinkOn = true;
+  DateTime? _dataLoggingSessionStartAt;
+  File? _dataLoggingSessionFile;
   bool _isReplayMode = false;
   bool _isReplayPlaying = false;
   bool _isLoadingReplayFile = false;
@@ -430,6 +433,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   late final TextEditingController _waveformTimeWindowMinController;
   late final TextEditingController _waveformTimeWindowMaxController;
   Timer? _dataLogSaveDebounce;
+  Timer? _dataLoggingBlinkTimer;
   Directory? _dataLogDirectory;
   Timer? _replayTimer;
   int _replayFrameIndex = -1;
@@ -594,6 +598,8 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     _waveSub?.cancel();
     _statusSub?.cancel();
     _dataLogSaveDebounce?.cancel();
+    _dataLoggingBlinkTimer?.cancel();
+    unawaited(_finalizeDataLoggingSession());
     _stopReplayTimer();
     _syncSettingsFromInputs();
     unawaited(_saveSettings());
@@ -1101,6 +1107,14 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         _dataLogs.removeRange(_maxRecentDataLogs, _dataLogs.length);
       }
 
+      if (_dataLoggingEnabled) {
+        unawaited(_startDataLoggingSession());
+      } else {
+        unawaited(_finalizeDataLoggingSession());
+      }
+
+      _syncDataLoggingBlinkTimer();
+
       _aiChannelMode = savedAiMode != null
           ? _parseAiChannelMode(savedAiMode)
           : _extractAiModeFromArgs(_bridgeArguments);
@@ -1235,14 +1249,18 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   }
 
   String _dataLogFileName(DateTime timestamp) {
-    final DateTime utc = timestamp.toUtc();
-    final String year = utc.year.toString().padLeft(4, '0');
-    final String month = utc.month.toString().padLeft(2, '0');
-    final String day = utc.day.toString().padLeft(2, '0');
-    return 'samples_$year-$month-$day.csv';
+    final DateTime local = timestamp.toLocal();
+    final String year = local.year.toString().padLeft(4, '0');
+    final String month = local.month.toString().padLeft(2, '0');
+    final String day = local.day.toString().padLeft(2, '0');
+    final String hour = local.hour.toString().padLeft(2, '0');
+    final String minute = local.minute.toString().padLeft(2, '0');
+    final String second = local.second.toString().padLeft(2, '0');
+    final String timePart = <String>[hour, 'h', minute, 'm', second].join();
+    return 'samples_$year-$month-$day-$timePart.csv';
   }
 
-  Future<File> _ensureDailyLogFile(DateTime timestamp) async {
+  Future<File> _ensureCurrentDataLogFile(DateTime timestamp) async {
     final Directory logDir = await _ensureDataLogDirectory();
     final File file = File(
       '${logDir.path}${Platform.pathSeparator}${_dataLogFileName(timestamp)}',
@@ -1259,8 +1277,42 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     return file;
   }
 
+  Future<void> _startDataLoggingSession({DateTime? startedAt}) async {
+    final DateTime sessionStartAt = (startedAt ?? DateTime.now()).toLocal();
+    _dataLoggingSessionStartAt ??= sessionStartAt;
+    final File file = await _ensureCurrentDataLogFile(
+      _dataLoggingSessionStartAt!,
+    );
+    _dataLoggingSessionFile = file;
+  }
+
+  Future<void> _finalizeDataLoggingSession() async {
+    final DateTime? sessionStartAt = _dataLoggingSessionStartAt;
+    final File? sessionFile = _dataLoggingSessionFile;
+    _dataLoggingSessionStartAt = null;
+    _dataLoggingSessionFile = null;
+
+    if (sessionStartAt == null || sessionFile == null) {
+      return;
+    }
+
+    final String footer = _buildCsvLine(<String>[
+      'sessionStartLocal',
+      sessionStartAt.toLocal().toIso8601String(),
+    ]);
+    await sessionFile.writeAsString(
+      '$footer\n',
+      mode: FileMode.append,
+      flush: true,
+    );
+  }
+
   Future<void> _appendDataLogToArchive(_LoggedSample sample) async {
-    final File file = await _ensureDailyLogFile(sample.timestamp);
+    final DateTime sessionStartAt =
+        _dataLoggingSessionStartAt ?? sample.timestamp.toLocal();
+    _dataLoggingSessionStartAt ??= sessionStartAt;
+    final File file = await _ensureCurrentDataLogFile(sessionStartAt);
+    _dataLoggingSessionFile ??= file;
     final String line = _buildCsvLine(sample.toCsvRow(_channels));
     await file.writeAsString('$line\n', mode: FileMode.append, flush: true);
   }
@@ -1305,6 +1357,8 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
 
   Future<void> _clearDataLogs() async {
     _dataLogSaveDebounce?.cancel();
+    _dataLoggingSessionStartAt = null;
+    _dataLoggingSessionFile = null;
     final Directory logDir = await _ensureDataLogDirectory();
     if (await logDir.exists()) {
       await logDir.delete(recursive: true);
@@ -2547,6 +2601,54 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     }
   }
 
+  Future<void> _toggleDataLogging() async {
+    setState(() {
+      _dataLoggingEnabled = !_dataLoggingEnabled;
+      _eventLogs.insert(
+        0,
+        '[${DateTime.now().toLocal()}] Data logging ${_dataLoggingEnabled ? 'enabled' : 'disabled'}',
+      );
+      _trimLogs();
+    });
+
+    if (_dataLoggingEnabled) {
+      await _startDataLoggingSession();
+    } else {
+      await _finalizeDataLoggingSession();
+    }
+
+    _syncDataLoggingBlinkTimer();
+    unawaited(_saveSettings());
+  }
+
+  void _syncDataLoggingBlinkTimer() {
+    if (!_dataLoggingEnabled) {
+      _dataLoggingBlinkTimer?.cancel();
+      _dataLoggingBlinkTimer = null;
+      if (mounted && _dataLoggingBlinkOn) {
+        setState(() {
+          _dataLoggingBlinkOn = false;
+        });
+      } else {
+        _dataLoggingBlinkOn = false;
+      }
+      return;
+    }
+
+    _dataLoggingBlinkOn = true;
+    _dataLoggingBlinkTimer ??= Timer.periodic(
+      const Duration(milliseconds: 450),
+      (_) {
+        if (!mounted || !_dataLoggingEnabled) {
+          return;
+        }
+        setState(() {
+          _dataLoggingBlinkOn = !_dataLoggingBlinkOn;
+        });
+      },
+    );
+  }
+
   SensorState _toState(double value) {
     if (value >= _dangerThreshold) {
       return SensorState.danger;
@@ -2628,6 +2730,23 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             child: Row(
               children: <Widget>[
+                FilledButton.tonalIcon(
+                  style: topActionButtonStyle,
+                  onPressed: _toggleDataLogging,
+                  icon: Icon(
+                    Icons.fiber_manual_record,
+                    color: _dataLoggingEnabled
+                        ? (_dataLoggingBlinkOn
+                              ? const Color(0xFFC0392B)
+                              : const Color(0x44C0392B))
+                        : const Color(0xFF5E6A79),
+                  ),
+                  label: Text(
+                    _dataLoggingEnabled ? 'Tạm dừng ghi' : 'Bắt đầu ghi',
+                    softWrap: false,
+                  ),
+                ),
+                const SizedBox(width: 8),
                 FilledButton.tonalIcon(
                   style: topActionButtonStyle,
                   onPressed: _toggleRun,
@@ -3898,126 +4017,247 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       ],
     );
 
+    const double replayButtonWidth = 102;
+
     final Widget replayControlPanel = Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: const Color(0xFFF5F8FC),
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: const Color(0xFFD8E3EE)),
       ),
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        crossAxisAlignment: WrapCrossAlignment.center,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          FilledButton.tonalIcon(
-            onPressed: _isLoadingReplayFile ? null : _pickReplayLogFile,
-            icon: const Icon(Icons.folder_open),
-            label: Text(_isLoadingReplayFile ? 'Đang nạp...' : 'Load file log'),
-          ),
-          OutlinedButton.icon(
-            onPressed: _openDataLogFolder,
-            icon: const Icon(Icons.folder_copy_outlined),
-            label: const Text('Mở thư mục log'),
-          ),
-          if (_isReplayMode) ...<Widget>[
-            FilledButton.tonalIcon(
-              onPressed: _replaySamples.isEmpty ? null : _toggleReplayPlayback,
-              icon: Icon(
-                _isReplayPlaying
-                    ? Icons.pause_circle_outline
-                    : Icons.play_circle_outline,
-              ),
-              label: Text(_isReplayPlaying ? 'Tạm dừng' : 'Phát lại'),
-            ),
-            OutlinedButton.icon(
-              onPressed: _replaySamples.isEmpty ? null : () => _seekReplayTo(0),
-              icon: const Icon(Icons.replay),
-              label: const Text('Về đầu'),
-            ),
-            OutlinedButton.icon(
-              onPressed: _exitReplayMode,
-              icon: const Icon(Icons.close),
-              label: const Text('Thoát replay'),
-            ),
-            Text(
-              _replayFilePath == null
-                  ? 'Chưa chọn file'
-                  : _fileNameFromPath(_replayFilePath!),
-              style: const TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-                color: Color(0xFF4D5C6B),
-              ),
-            ),
-          ],
-          Text(
-            _isReplayMode
-                ? 'Replay dùng mốc thời gian từ file CSV. Có thể play, pause và kéo thanh thời gian như video.'
-                : 'Biểu đồ đang hiển thị dữ liệu live.',
-            style: const TextStyle(fontSize: 11, color: Color(0xFF5E6A79)),
-          ),
-        ],
-      ),
-    );
-
-    final Widget replayTimelinePanel = _isReplayMode
-        ? Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF5F8FC),
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: const Color(0xFFD8E3EE)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
               children: <Widget>[
-                Row(
-                  children: <Widget>[
-                    Expanded(
-                      child: Text(
-                        'Vị trí: ${_formatDurationLabel(Duration(milliseconds: _replayPositionMs.round()))} / ${_formatDurationLabel(Duration(milliseconds: replayTotalMs.round()))}',
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: Color(0xFF314556),
+                Tooltip(
+                  message: 'Chọn file log CSV để phát lại',
+                  child: SizedBox(
+                    width: replayButtonWidth,
+                    child: FilledButton.tonalIcon(
+                      style: FilledButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 8,
+                        ),
+                      ),
+                      onPressed: _isLoadingReplayFile
+                          ? null
+                          : _pickReplayLogFile,
+                      icon: const Icon(Icons.folder_open, size: 16),
+                      label: Text(
+                        _isLoadingReplayFile ? 'Đang nạp' : 'Load log',
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Tooltip(
+                  message: 'Mở thư mục chứa file log',
+                  child: SizedBox(
+                    width: replayButtonWidth,
+                    child: OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 8,
+                        ),
+                      ),
+                      onPressed: _openDataLogFolder,
+                      icon: const Icon(Icons.folder_copy_outlined, size: 16),
+                      label: const Text('Thư mục'),
+                    ),
+                  ),
+                ),
+                if (_isReplayMode) ...<Widget>[
+                  const SizedBox(width: 6),
+                  Tooltip(
+                    message: _isReplayPlaying
+                        ? 'Tạm dừng phát lại'
+                        : 'Phát lại',
+                    child: SizedBox(
+                      width: replayButtonWidth,
+                      child: FilledButton.tonal(
+                        style: FilledButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          minimumSize: const Size(34, 30),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 6,
+                          ),
+                        ),
+                        onPressed: _replaySamples.isEmpty
+                            ? null
+                            : _toggleReplayPlayback,
+                        child: Icon(
+                          _isReplayPlaying
+                              ? Icons.pause_circle_outline
+                              : Icons.play_circle_outline,
+                          size: 18,
                         ),
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    Wrap(
-                      spacing: 6,
-                      runSpacing: 4,
-                      children: _replaySpeedOptions.map((double speed) {
-                        final bool selected = _replaySpeed == speed;
-                        return ChoiceChip(
+                  ),
+                  const SizedBox(width: 6),
+                  Tooltip(
+                    message: 'Về đầu timeline',
+                    child: SizedBox(
+                      width: replayButtonWidth,
+                      child: OutlinedButton(
+                        style: OutlinedButton.styleFrom(
                           visualDensity: VisualDensity.compact,
-                          materialTapTargetSize:
-                              MaterialTapTargetSize.shrinkWrap,
-                          label: Text(
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          minimumSize: const Size(34, 30),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 6,
+                          ),
+                        ),
+                        onPressed: _replaySamples.isEmpty
+                            ? null
+                            : () => _seekReplayTo(0),
+                        child: const Icon(Icons.replay, size: 17),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  PopupMenuButton<double>(
+                    enabled: _replaySamples.isNotEmpty,
+                    initialValue: _replaySpeed,
+                    tooltip: 'Tốc độ phát lại',
+                    onSelected: (double speed) {
+                      final bool wasPlaying = _isReplayPlaying;
+                      if (wasPlaying) {
+                        _pauseReplay();
+                      }
+                      setState(() {
+                        _replaySpeed = speed;
+                      });
+                      if (wasPlaying) {
+                        _startReplayPlayback();
+                      }
+                    },
+                    itemBuilder: (BuildContext context) {
+                      return _replaySpeedOptions.map((double speed) {
+                        return PopupMenuItem<double>(
+                          value: speed,
+                          child: Text(
                             '${speed.toStringAsFixed(speed.truncateToDouble() == speed ? 0 : 1)}x',
                           ),
-                          selected: selected,
-                          onSelected: (_) {
-                            final bool wasPlaying = _isReplayPlaying;
-                            if (wasPlaying) {
-                              _pauseReplay();
-                            }
-                            setState(() {
-                              _replaySpeed = speed;
-                            });
-                            if (wasPlaying) {
-                              _startReplayPlayback();
-                            }
-                          },
                         );
-                      }).toList(),
+                      }).toList();
+                    },
+                    child: SizedBox(
+                      width: replayButtonWidth,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: const Color(0xFFB6CCE2)),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: <Widget>[
+                            const Icon(Icons.speed, size: 14),
+                            const SizedBox(width: 4),
+                            Text(
+                              '${_replaySpeed.toStringAsFixed(_replaySpeed.truncateToDouble() == _replaySpeed ? 0 : 1)}x',
+                              style: const TextStyle(fontSize: 11),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
-                  ],
+                  ),
+                  const SizedBox(width: 6),
+                  Tooltip(
+                    message: 'Thoát chế độ phát lại',
+                    child: SizedBox(
+                      width: replayButtonWidth,
+                      child: OutlinedButton(
+                        style: OutlinedButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          minimumSize: const Size(34, 30),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 6,
+                          ),
+                        ),
+                        onPressed: _exitReplayMode,
+                        child: const Icon(Icons.close, size: 16),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: 2),
+          if (_isReplayMode) ...<Widget>[
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    _replayFilePath == null
+                        ? 'Replay'
+                        : _fileNameFromPath(_replayFilePath!),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF314556),
+                    ),
+                  ),
                 ),
-                Slider(
+                const SizedBox(width: 8),
+                Text(
+                  '${_formatDurationLabel(Duration(milliseconds: _replayPositionMs.round()))}/${_formatDurationLabel(Duration(milliseconds: replayTotalMs.round()))}',
+                  style: const TextStyle(
+                    fontSize: 10,
+                    color: Color(0xFF5E6A79),
+                  ),
+                ),
+                if (_replayFrameIndex >= 0)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 8),
+                    child: Text(
+                      '${_replayFrameIndex + 1}/${_replaySamples.length}',
+                      style: const TextStyle(
+                        fontSize: 10,
+                        color: Color(0xFF5E6A79),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            SizedBox(
+              height: 26,
+              child: SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  trackHeight: 2,
+                  thumbShape: const RoundSliderThumbShape(
+                    enabledThumbRadius: 6,
+                    disabledThumbRadius: 6,
+                  ),
+                  overlayShape: const RoundSliderOverlayShape(
+                    overlayRadius: 10,
+                  ),
+                ),
+                child: Slider(
                   min: 0,
                   max: max(replayTotalMs, 1),
                   value: _replaySamples.isEmpty
@@ -4032,18 +4272,20 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                           _seekReplayTo(value);
                         },
                 ),
-                if (_replayFrameIndex >= 0)
-                  Text(
-                    'Khung hiện tại: ${_formatLogTimestamp(_replaySamples[_replayFrameIndex].timestamp)} • ${_replayFrameIndex + 1}/${_replaySamples.length} mẫu',
-                    style: const TextStyle(
-                      fontSize: 11,
-                      color: Color(0xFF5E6A79),
-                    ),
-                  ),
-              ],
+              ),
             ),
-          )
-        : const SizedBox.shrink();
+          ] else
+            const Text(
+              'Chế độ live',
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF4D5C6B),
+              ),
+            ),
+        ],
+      ),
+    );
 
     final Widget combinedHeaderPanel = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -4122,13 +4364,9 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
             ),
           ],
         ),
-        const SizedBox(height: 6),
+        const SizedBox(height: 4),
         replayControlPanel,
-        if (_isReplayMode) ...<Widget>[
-          const SizedBox(height: 8),
-          replayTimelinePanel,
-        ],
-        const SizedBox(height: 6),
+        const SizedBox(height: 4),
         Container(
           width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -5269,20 +5507,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                     style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
                   ),
                 ),
-                Switch.adaptive(
-                  value: _dataLoggingEnabled,
-                  onChanged: (bool value) {
-                    setState(() {
-                      _dataLoggingEnabled = value;
-                      _eventLogs.insert(
-                        0,
-                        '[${DateTime.now().toLocal()}] Data logging ${value ? 'enabled' : 'disabled'}',
-                      );
-                      _trimLogs();
-                    });
-                    unawaited(_saveSettings());
-                  },
-                ),
               ],
             ),
             const SizedBox(height: 8),
@@ -5329,6 +5553,11 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                   ),
                 ),
               ],
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Điều khiển ghi dữ liệu đã được chuyển lên màn hình chính.',
+              style: TextStyle(fontSize: 12, color: Color(0xFF5E6A79)),
             ),
           ],
         ),
