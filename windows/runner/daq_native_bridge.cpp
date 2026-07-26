@@ -546,58 +546,48 @@ int DaqNativeBridge::RunStreamRead(const StreamConfig& config) {
           std::sqrt(sq_sum / static_cast<double>(samples_read));
     }
 
-    {
-      std::ostringstream line;
-      line << "DATA_MULTI," << config.sample_rate_hz << "," << samples_read
-           << "," << channel_count;
-      for (uInt32 ch = 0; ch < channel_count; ++ch) {
-        line << "," << rms_by_channel[static_cast<size_t>(ch)];
-      }
-      EmitLine(line.str());
+    const int fft_n = NextPow2(static_cast<int>(samples_read));
+    const int half_n = fft_n / 2;
+    const int bins_out =
+        (config.fft_bins_out > 0 && config.fft_bins_out < half_n)
+            ? config.fft_bins_out
+            : half_n;
+    constexpr int kDecimStep = 5;
+
+    std::vector<double> ch_input(static_cast<size_t>(samples_read));
+    std::vector<double> mags;
+
+    std::ostringstream line;
+    line << "BLOCK_MULTI," << static_cast<int>(config.sample_rate_hz) << ","
+         << samples_read << "," << channel_count << "," << bins_out << ","
+         << kDecimStep;
+    line << std::fixed << std::setprecision(6);
+
+    // Append RMS values first, one value per channel.
+    for (uInt32 ch = 0; ch < channel_count; ++ch) {
+      line << "," << rms_by_channel[static_cast<size_t>(ch)];
     }
 
-    {
-      const int fft_n = NextPow2(static_cast<int>(samples_read));
-      const int half_n = fft_n / 2;
-      const int bins_out =
-          (config.fft_bins_out > 0 && config.fft_bins_out < half_n)
-              ? config.fft_bins_out
-              : half_n;
-
-      std::vector<double> ch_input(static_cast<size_t>(samples_read));
-      std::vector<double> mags;
-      std::ostringstream line;
-      line << "FFT_MULTI," << static_cast<int>(config.sample_rate_hz) << ","
-           << samples_read << "," << channel_count << "," << bins_out;
-      line << std::fixed << std::setprecision(6);
-
-      for (uInt32 ch = 0; ch < channel_count; ++ch) {
-        for (int32 i = 0; i < samples_read; ++i) {
-          ch_input[static_cast<size_t>(i)] =
-              samples[static_cast<size_t>(i) * channel_count + ch];
-        }
-        ComputeFftMagnitudes(ch_input.data(), samples_read, fft_n, &mags);
-        for (int b = 0; b < bins_out; ++b) {
-          line << "," << mags[static_cast<size_t>(b)];
-        }
+    // Append FFT magnitudes in channel-major layout.
+    for (uInt32 ch = 0; ch < channel_count; ++ch) {
+      for (int32 i = 0; i < samples_read; ++i) {
+        ch_input[static_cast<size_t>(i)] =
+            samples[static_cast<size_t>(i) * channel_count + ch];
       }
-      EmitLine(line.str());
+      ComputeFftMagnitudes(ch_input.data(), samples_read, fft_n, &mags);
+      for (int b = 0; b < bins_out; ++b) {
+        line << "," << mags[static_cast<size_t>(b)];
+      }
     }
 
-    {
-      constexpr int kDecimStep = 5;
-      std::ostringstream line;
-      line << "WAVE_MULTI," << static_cast<int>(config.sample_rate_hz) << ","
-           << samples_read << "," << channel_count << "," << kDecimStep;
-      line << std::fixed << std::setprecision(6);
-      for (uInt32 ch = 0; ch < channel_count; ++ch) {
-        for (int32 i = 0; i < samples_read; i += kDecimStep) {
-          line << ","
-               << samples[static_cast<size_t>(i) * channel_count + ch];
-        }
+    // Append decimated waveform samples in channel-major layout.
+    for (uInt32 ch = 0; ch < channel_count; ++ch) {
+      for (int32 i = 0; i < samples_read; i += kDecimStep) {
+        line << "," << samples[static_cast<size_t>(i) * channel_count + ch];
       }
-      EmitLine(line.str());
     }
+
+    EmitLine(line.str());
   }
 
 Error:

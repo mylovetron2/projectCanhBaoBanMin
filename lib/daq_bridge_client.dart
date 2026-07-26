@@ -81,6 +81,56 @@ class DaqWaveFrame {
   double timeMs(int i) => (i * decimStep) / sampleRateHz * 1000.0;
 }
 
+class DaqBlockFrame {
+  DaqBlockFrame({
+    required this.sampleRateHz,
+    required this.samplesRead,
+    required this.channelCount,
+    required this.binCount,
+    required this.decimStep,
+    required this.channelRmsValues,
+    required this.magnitudes,
+    required this.channelSamples,
+  });
+
+  final int sampleRateHz;
+  final int samplesRead;
+  final int channelCount;
+  final int binCount;
+  final int decimStep;
+  final List<double> channelRmsValues;
+  final List<double> magnitudes;
+  final List<List<double>> channelSamples;
+
+  DaqFftFrame toFftFrame() {
+    return DaqFftFrame(
+      sampleRateHz: sampleRateHz,
+      samplesRead: samplesRead,
+      channelCount: channelCount,
+      binCount: binCount,
+      magnitudes: magnitudes,
+    );
+  }
+
+  DaqWaveFrame toWaveFrame() {
+    return DaqWaveFrame(
+      sampleRateHz: sampleRateHz,
+      samplesRead: samplesRead,
+      decimStep: decimStep,
+      channelCount: channelCount,
+      channelSamples: channelSamples,
+    );
+  }
+
+  DaqFrame toRmsFrame() {
+    return DaqFrame(
+      sampleRateHz: sampleRateHz,
+      samplesRead: samplesRead,
+      channelRmsVolts: channelRmsValues,
+    );
+  }
+}
+
 class DaqBridgeClient {
   static const MethodChannel _nativeMethodChannel = MethodChannel(
     'mine_alert/daq_bridge_method',
@@ -95,6 +145,8 @@ class DaqBridgeClient {
       StreamController<DaqFftFrame>.broadcast();
   final StreamController<DaqWaveFrame> _waveFrameController =
       StreamController<DaqWaveFrame>.broadcast();
+  final StreamController<DaqBlockFrame> _blockFrameController =
+      StreamController<DaqBlockFrame>.broadcast();
   final StreamController<String> _statusController =
       StreamController<String>.broadcast();
 
@@ -108,6 +160,7 @@ class DaqBridgeClient {
   Stream<DaqFrame> get frames => _frameController.stream;
   Stream<DaqFftFrame> get fftFrames => _fftFrameController.stream;
   Stream<DaqWaveFrame> get waveFrames => _waveFrameController.stream;
+  Stream<DaqBlockFrame> get blockFrames => _blockFrameController.stream;
   Stream<String> get status => _statusController.stream;
 
   bool get isRunning => Platform.isWindows ? _nativeRunning : _process != null;
@@ -244,6 +297,7 @@ class DaqBridgeClient {
     await _frameController.close();
     await _fftFrameController.close();
     await _waveFrameController.close();
+    await _blockFrameController.close();
     await _statusController.close();
   }
 
@@ -339,6 +393,92 @@ class DaqBridgeClient {
             magnitudes: mags,
           ),
         );
+      }
+      return;
+    }
+
+    if (line.startsWith('BLOCK_MULTI,')) {
+      final List<String> parts = line.split(',');
+      // Header: BLOCK_MULTI,<rate>,<samplesRead>,<channelCount>,<binCount>,<decimStep>
+      if (parts.length < 7) {
+        _emitStatus('Malformed BLOCK_MULTI: insufficient fields');
+        return;
+      }
+      final int? rate = int.tryParse(parts[1]);
+      final int? samplesRead = int.tryParse(parts[2]);
+      final int? channelCount = int.tryParse(parts[3]);
+      final int? binCount = int.tryParse(parts[4]);
+      final int? decimStep = int.tryParse(parts[5]);
+      if (rate == null ||
+          samplesRead == null ||
+          channelCount == null ||
+          binCount == null ||
+          decimStep == null ||
+          channelCount <= 0 ||
+          binCount <= 0 ||
+          decimStep <= 0) {
+        _emitStatus('BLOCK_MULTI invalid header values');
+        return;
+      }
+
+      final int outCount = (samplesRead + decimStep - 1) ~/ decimStep;
+      final int rmsStart = 6;
+      final int fftStart = rmsStart + channelCount;
+      final int waveStart = fftStart + (channelCount * binCount);
+      final int expected = waveStart + (channelCount * outCount);
+      if (parts.length != expected) {
+        _emitStatus(
+          'BLOCK_MULTI size mismatch: got ${parts.length}, expected $expected',
+        );
+        return;
+      }
+
+      final List<double> rmsValues = List<double>.filled(channelCount, 0.0);
+      for (int i = 0; i < channelCount; i++) {
+        final double? v = double.tryParse(parts[rmsStart + i]);
+        if (v == null) {
+          _emitStatus('BLOCK_MULTI invalid RMS at index $i');
+          return;
+        }
+        rmsValues[i] = v;
+      }
+
+      final List<double> mags = List<double>.filled(
+        channelCount * binCount,
+        0.0,
+      );
+      for (int i = 0; i < mags.length; i++) {
+        final double? v = double.tryParse(parts[fftStart + i]);
+        if (v == null) {
+          _emitStatus('BLOCK_MULTI invalid FFT magnitude at index $i');
+          return;
+        }
+        mags[i] = v;
+      }
+
+      final List<List<double>> channelSamples = List<List<double>>.generate(
+        channelCount,
+        (int ch) {
+          final int offset = waveStart + ch * outCount;
+          return List<double>.generate(outCount, (int i) {
+            return double.tryParse(parts[offset + i]) ?? 0.0;
+          });
+        },
+      );
+
+      final DaqBlockFrame block = DaqBlockFrame(
+        sampleRateHz: rate,
+        samplesRead: samplesRead,
+        channelCount: channelCount,
+        binCount: binCount,
+        decimStep: decimStep,
+        channelRmsValues: rmsValues,
+        magnitudes: mags,
+        channelSamples: channelSamples,
+      );
+
+      if (!_blockFrameController.isClosed) {
+        _blockFrameController.add(block);
       }
       return;
     }

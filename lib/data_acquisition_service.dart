@@ -13,17 +13,22 @@ class AcquisitionSample {
     this.rawRmsVolts = const <String, double>{},
     this.sampleRateHz,
     this.samplesRead,
+    this.fftFrame,
+    this.waveFrame,
   });
 
   final Map<String, double> values;
   final Map<String, double> rawRmsVolts;
   final int? sampleRateHz;
   final int? samplesRead;
+  final DaqFftFrame? fftFrame;
+  final DaqWaveFrame? waveFrame;
 }
 
 class DataAcquisitionService {
   DataAcquisitionService({required List<String> channels})
     : _channels = List<String>.from(channels) {
+    _bridgeBlockSub = _bridgeClient.blockFrames.listen(_onBridgeBlockFrame);
     _bridgeFrameSub = _bridgeClient.frames.listen(_onBridgeFrame);
     _bridgeFftSub = _bridgeClient.fftFrames.listen((DaqFftFrame frame) {
       if (!_fftController.isClosed) {
@@ -56,6 +61,7 @@ class DataAcquisitionService {
   StreamSubscription<DaqFrame>? _bridgeFrameSub;
   StreamSubscription<DaqFftFrame>? _bridgeFftSub;
   StreamSubscription<DaqWaveFrame>? _bridgeWaveSub;
+  StreamSubscription<DaqBlockFrame>? _bridgeBlockSub;
   StreamSubscription<String>? _bridgeStatusSub;
   Timer? _mockTimer;
 
@@ -131,6 +137,7 @@ class DataAcquisitionService {
     _bridgeFrameSub?.cancel();
     _bridgeFftSub?.cancel();
     _bridgeWaveSub?.cancel();
+    _bridgeBlockSub?.cancel();
     _bridgeStatusSub?.cancel();
     await _bridgeClient.dispose();
     await _sampleController.close();
@@ -223,6 +230,20 @@ class DataAcquisitionService {
         rawRmsVolts: rawRmsVolts,
         sampleRateHz: sampleRateHz,
         samplesRead: samplesPerRead,
+        fftFrame: DaqFftFrame(
+          sampleRateHz: sampleRateHz,
+          samplesRead: samplesPerRead,
+          channelCount: _channels.length,
+          binCount: fftSize ~/ 2,
+          magnitudes: flatFftMagnitudes,
+        ),
+        waveFrame: DaqWaveFrame(
+          sampleRateHz: sampleRateHz,
+          samplesRead: samplesPerRead,
+          decimStep: decimStep,
+          channelCount: _channels.length,
+          channelSamples: waveChannelSamples,
+        ),
       ),
     );
 
@@ -339,6 +360,55 @@ class DataAcquisitionService {
         rawRmsVolts: rawRmsVolts,
         sampleRateHz: frame.sampleRateHz,
         samplesRead: frame.samplesRead,
+      ),
+    );
+  }
+
+  void _onBridgeBlockFrame(DaqBlockFrame block) {
+    if (_source != AcquisitionSource.bridge || !_isRunning) {
+      return;
+    }
+
+    final Map<String, double> values = <String, double>{};
+    final Map<String, double> rawRmsVolts = <String, double>{};
+
+    for (int i = 0; i < _channels.length; i++) {
+      final String channel = _channels[i];
+      final double rms = i < block.channelRmsValues.length
+          ? block.channelRmsValues[i]
+          : 0.0;
+      rawRmsVolts[channel] = rms;
+      values[channel] = _bridgeSignalUnit == BridgeSignalUnit.accelerationG
+          ? rms
+          : (rms / 2.0).clamp(0.0, 1.2);
+    }
+
+    final double ai9Rms = block.channelRmsValues.length > 9
+        ? block.channelRmsValues[9]
+        : 0.0;
+    final String unitLabel = _bridgeSignalUnit == BridgeSignalUnit.accelerationG
+        ? 'g'
+        : 'V';
+
+    _statusController.add(
+      'BLOCK ${block.sampleRateHz} Hz, block ${block.samplesRead}, channels ${block.channelRmsValues.length}, AI9 rms ${ai9Rms.toStringAsFixed(4)} $unitLabel',
+    );
+
+    if (!_fftController.isClosed) {
+      _fftController.add(block.toFftFrame());
+    }
+    if (!_waveController.isClosed) {
+      _waveController.add(block.toWaveFrame());
+    }
+
+    _sampleController.add(
+      AcquisitionSample(
+        values: values,
+        rawRmsVolts: rawRmsVolts,
+        sampleRateHz: block.sampleRateHz,
+        samplesRead: block.samplesRead,
+        fftFrame: block.toFftFrame(),
+        waveFrame: block.toWaveFrame(),
       ),
     );
   }

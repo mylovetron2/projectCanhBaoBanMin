@@ -424,7 +424,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   int _bridgeFftBinCount = 0;
   int _bridgeFftSamplesRead = 0;
   DateTime? _bridgeFftCapturedAt;
-  StreamSubscription<DaqFftFrame>? _fftSub;
 
   // Latest raw waveform from C bridge (bridge mode only)
   final Map<String, List<double>> _bridgeWaveSamples = <String, List<double>>{};
@@ -435,7 +434,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   double _waveformTimeWindowMs = 200.0; // User-configurable time axis scale
   double _waveformTimeWindowMinMs = 20.0;
   double _waveformTimeWindowMaxMs = 2000.0;
-  StreamSubscription<DaqWaveFrame>? _waveSub;
   final Set<String> _hiddenChannels = <String>{};
   final Set<String> _hiddenCombinedChannels = <String>{};
   double _warningThreshold = 0.65;
@@ -582,8 +580,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     }
 
     _sampleSub = _acquisitionService.samples.listen(_onAcquisitionSample);
-    _fftSub = _acquisitionService.fftFrames.listen(_onBridgeFftFrame);
-    _waveSub = _acquisitionService.waveFrames.listen(_onBridgeWaveFrame);
     _statusSub = _acquisitionService.status.listen((String line) {
       if (!mounted) {
         return;
@@ -642,8 +638,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _sampleSub?.cancel();
-    _fftSub?.cancel();
-    _waveSub?.cancel();
     _statusSub?.cancel();
     _dataLogSaveDebounce?.cancel();
     _dataLoggingBlinkTimer?.cancel();
@@ -2598,37 +2592,41 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     }
   }
 
-  void _onBridgeFftFrame(DaqFftFrame frame) {
-    if (!_isRunning || !mounted || _isReplayMode) return;
-    setState(() {
-      _bridgeFftSampleRateHz = frame.sampleRateHz;
-      _bridgeFftBinCount = frame.binCount;
-      _bridgeFftSamplesRead = frame.samplesRead;
-      _bridgeFftCapturedAt = DateTime.now();
-      for (int ch = 0; ch < frame.channelCount && ch < _channels.length; ch++) {
-        _bridgeFftMags[_channels[ch]] = frame.channelMags(ch);
-      }
-    });
-  }
-
-  void _onBridgeWaveFrame(DaqWaveFrame frame) {
-    if (!_isRunning || !mounted || _isReplayMode) return;
-    setState(() {
-      _bridgeWaveSampleRateHz = frame.sampleRateHz;
-      _bridgeWaveDecimStep = frame.decimStep;
-      _bridgeWaveCapturedAt = DateTime.now();
-      for (int ch = 0; ch < frame.channelCount && ch < _channels.length; ch++) {
-        _bridgeWaveSamples[_channels[ch]] = frame.channelSamples[ch];
-      }
-    });
-  }
-
   void _onAcquisitionSample(AcquisitionSample sample) {
     if (!_isRunning || !mounted || _isReplayMode) {
       return;
     }
 
     setState(() {
+      final DaqFftFrame? fftFrame = sample.fftFrame;
+      if (fftFrame != null) {
+        _bridgeFftSampleRateHz = fftFrame.sampleRateHz;
+        _bridgeFftBinCount = fftFrame.binCount;
+        _bridgeFftSamplesRead = fftFrame.samplesRead;
+        _bridgeFftCapturedAt = DateTime.now();
+        for (
+          int ch = 0;
+          ch < fftFrame.channelCount && ch < _channels.length;
+          ch++
+        ) {
+          _bridgeFftMags[_channels[ch]] = fftFrame.channelMags(ch);
+        }
+      }
+
+      final DaqWaveFrame? waveFrame = sample.waveFrame;
+      if (waveFrame != null) {
+        _bridgeWaveSampleRateHz = waveFrame.sampleRateHz;
+        _bridgeWaveDecimStep = waveFrame.decimStep;
+        _bridgeWaveCapturedAt = DateTime.now();
+        for (
+          int ch = 0;
+          ch < waveFrame.channelCount && ch < _channels.length;
+          ch++
+        ) {
+          _bridgeWaveSamples[_channels[ch]] = waveFrame.channelSamples[ch];
+        }
+      }
+
       for (final MapEntry<String, double> entry in sample.values.entries) {
         _appendChannelValue(entry.key, entry.value);
       }
