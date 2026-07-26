@@ -227,12 +227,16 @@ class _LoggedSample {
     required this.values,
     this.sampleRateHz,
     this.samplesRead,
+    this.wavePayloadJson,
+    this.fftPayloadJson,
   });
 
   final DateTime timestamp;
   final Map<String, double> values;
   final int? sampleRateHz;
   final int? samplesRead;
+  final String? wavePayloadJson;
+  final String? fftPayloadJson;
 
   Map<String, Object?> toJson() {
     return <String, Object?>{
@@ -240,6 +244,8 @@ class _LoggedSample {
       'sampleRateHz': sampleRateHz,
       'samplesRead': samplesRead,
       'values': values,
+      'wavePayloadJson': wavePayloadJson,
+      'fftPayloadJson': fftPayloadJson,
     };
   }
 
@@ -251,6 +257,8 @@ class _LoggedSample {
       ...channels.map(
         (String channel) => values[channel]?.toStringAsFixed(6) ?? '',
       ),
+      wavePayloadJson ?? '',
+      fftPayloadJson ?? '',
     ];
   }
 
@@ -287,6 +295,8 @@ class _LoggedSample {
         values: values,
         sampleRateHz: (decoded['sampleRateHz'] as num?)?.toInt(),
         samplesRead: (decoded['samplesRead'] as num?)?.toInt(),
+        wavePayloadJson: decoded['wavePayloadJson']?.toString(),
+        fftPayloadJson: decoded['fftPayloadJson']?.toString(),
       );
     } catch (_) {
       return null;
@@ -1271,10 +1281,58 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         'sampleRateHz',
         'samplesRead',
         ..._channels,
+        'wavePayloadJson',
+        'fftPayloadJson',
       ]);
       await file.writeAsString('$header\n', flush: true);
     }
     return file;
+  }
+
+  String? _buildWavePayloadJsonForLog() {
+    if (_bridgeWaveSampleRateHz <= 0) {
+      return null;
+    }
+    final Map<String, List<double>> channels = <String, List<double>>{};
+    for (final String channel in _channels) {
+      final List<double>? samples = _bridgeWaveSamples[channel];
+      if (samples == null || samples.isEmpty) {
+        continue;
+      }
+      channels[channel] = List<double>.from(samples);
+    }
+    if (channels.isEmpty) {
+      return null;
+    }
+    return jsonEncode(<String, Object?>{
+      'sampleRateHz': _bridgeWaveSampleRateHz,
+      'decimStep': _bridgeWaveDecimStep,
+      'unit': _bridgeRawUnitLabel(),
+      'channels': channels,
+    });
+  }
+
+  String? _buildFftPayloadJsonForLog() {
+    if (_bridgeFftSampleRateHz <= 0 || _bridgeFftBinCount <= 0) {
+      return null;
+    }
+    final Map<String, List<double>> channels = <String, List<double>>{};
+    for (final String channel in _channels) {
+      final List<double>? mags = _bridgeFftMags[channel];
+      if (mags == null || mags.isEmpty) {
+        continue;
+      }
+      channels[channel] = List<double>.from(mags);
+    }
+    if (channels.isEmpty) {
+      return null;
+    }
+    return jsonEncode(<String, Object?>{
+      'sampleRateHz': _bridgeFftSampleRateHz,
+      'samplesRead': _bridgeFftSamplesRead,
+      'binCount': _bridgeFftBinCount,
+      'channels': channels,
+    });
   }
 
   Future<void> _startDataLoggingSession({DateTime? startedAt}) async {
@@ -1327,6 +1385,8 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       values: Map<String, double>.from(sample.values),
       sampleRateHz: sample.sampleRateHz,
       samplesRead: sample.samplesRead,
+      wavePayloadJson: _buildWavePayloadJsonForLog(),
+      fftPayloadJson: _buildFftPayloadJsonForLog(),
     );
 
     _dataLogs.insert(0, loggedSample);
@@ -1523,6 +1583,16 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       'samples',
       'n',
     ]);
+    final int wavePayloadIndex = findHeaderIndex(<String>[
+      'wavepayloadjson',
+      'wavejson',
+      'wavepayload',
+    ]);
+    final int fftPayloadIndex = findHeaderIndex(<String>[
+      'fftpayloadjson',
+      'fftjson',
+      'fftpayload',
+    ]);
     if (timestampIndex < 0) {
       throw const FormatException(
         'Thiếu cột thời gian (timestampUtc/timestamp/time) trong file log.',
@@ -1578,6 +1648,14 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
               : null,
           samplesRead: samplesReadIndex >= 0 && samplesReadIndex < fields.length
               ? _parseCsvNumber(fields[samplesReadIndex])?.round()
+              : null,
+          wavePayloadJson:
+              wavePayloadIndex >= 0 && wavePayloadIndex < fields.length
+              ? fields[wavePayloadIndex].trim()
+              : null,
+          fftPayloadJson:
+              fftPayloadIndex >= 0 && fftPayloadIndex < fields.length
+              ? fields[fftPayloadIndex].trim()
               : null,
         ),
       );
@@ -3076,6 +3154,169 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     return p;
   }
 
+  _LoggedSample? _currentReplaySample() {
+    if (!_isReplayMode ||
+        _replayFrameIndex < 0 ||
+        _replayFrameIndex >= _replaySamples.length) {
+      return null;
+    }
+    return _replaySamples[_replayFrameIndex];
+  }
+
+  Map<String, dynamic>? _decodePayloadObject(String? raw) {
+    if (raw == null) {
+      return null;
+    }
+    final String text = raw.trim();
+    if (text.isEmpty) {
+      return null;
+    }
+    try {
+      final Object? decoded = jsonDecode(text);
+      if (decoded is Map<String, dynamic>) {
+        return decoded;
+      }
+    } catch (_) {
+      return null;
+    }
+    return null;
+  }
+
+  ({
+    int sampleRateHz,
+    int decimStep,
+    String unit,
+    Map<String, List<double>> channelSamples,
+  })?
+  _extractReplayWavePayload(_LoggedSample sample) {
+    final Map<String, dynamic>? payload = _decodePayloadObject(
+      sample.wavePayloadJson,
+    );
+    if (payload == null) {
+      return null;
+    }
+
+    final int? sampleRateHz = (payload['sampleRateHz'] as num?)?.toInt();
+    final int decimStep = ((payload['decimStep'] as num?)?.toInt() ?? 1).clamp(
+      1,
+      1 << 20,
+    );
+    final String unit = payload['unit']?.toString() ?? 'g';
+    if (sampleRateHz == null || sampleRateHz <= 0) {
+      return null;
+    }
+
+    final Map<String, List<double>> channelSamples = <String, List<double>>{};
+    final Object? channelsRaw = payload['channels'];
+    if (channelsRaw is Map) {
+      for (final MapEntry<dynamic, dynamic> entry in channelsRaw.entries) {
+        final String channel = entry.key.toString();
+        final Object? samplesRaw = entry.value;
+        if (samplesRaw is! List) {
+          continue;
+        }
+        final List<double> samples = samplesRaw
+            .whereType<num>()
+            .map((num value) => value.toDouble())
+            .toList(growable: false);
+        if (samples.isNotEmpty) {
+          channelSamples[channel] = samples;
+        }
+      }
+    }
+
+    // Backward compatibility for older single-channel payload format.
+    if (channelSamples.isEmpty) {
+      final String channel = payload['channel']?.toString() ?? '';
+      final Object? samplesRaw = payload['samples'];
+      if (channel.isNotEmpty && samplesRaw is List) {
+        final List<double> samples = samplesRaw
+            .whereType<num>()
+            .map((num value) => value.toDouble())
+            .toList(growable: false);
+        if (samples.isNotEmpty) {
+          channelSamples[channel] = samples;
+        }
+      }
+    }
+
+    if (channelSamples.isEmpty) {
+      return null;
+    }
+    return (
+      sampleRateHz: sampleRateHz,
+      decimStep: decimStep,
+      unit: unit,
+      channelSamples: channelSamples,
+    );
+  }
+
+  ({
+    int sampleRateHz,
+    int samplesRead,
+    int binCount,
+    Map<String, List<double>> channelMags,
+  })?
+  _extractReplayFftPayload(_LoggedSample sample) {
+    final Map<String, dynamic>? payload = _decodePayloadObject(
+      sample.fftPayloadJson,
+    );
+    if (payload == null) {
+      return null;
+    }
+
+    final int? sampleRateHz = (payload['sampleRateHz'] as num?)?.toInt();
+    final int samplesRead = (payload['samplesRead'] as num?)?.toInt() ?? 0;
+    final int binCount = (payload['binCount'] as num?)?.toInt() ?? 0;
+    if (sampleRateHz == null || sampleRateHz <= 0) {
+      return null;
+    }
+
+    final Map<String, List<double>> channelMags = <String, List<double>>{};
+    final Object? channelsRaw = payload['channels'];
+    if (channelsRaw is Map) {
+      for (final MapEntry<dynamic, dynamic> entry in channelsRaw.entries) {
+        final String channel = entry.key.toString();
+        final Object? magsRaw = entry.value;
+        if (magsRaw is! List) {
+          continue;
+        }
+        final List<double> mags = magsRaw
+            .whereType<num>()
+            .map((num value) => value.toDouble())
+            .toList(growable: false);
+        if (mags.isNotEmpty) {
+          channelMags[channel] = mags;
+        }
+      }
+    }
+
+    // Backward compatibility for older single-channel payload format.
+    if (channelMags.isEmpty) {
+      final String channel = payload['channel']?.toString() ?? '';
+      final Object? magsRaw = payload['mags'];
+      if (channel.isNotEmpty && magsRaw is List) {
+        final List<double> mags = magsRaw
+            .whereType<num>()
+            .map((num value) => value.toDouble())
+            .toList(growable: false);
+        if (mags.isNotEmpty) {
+          channelMags[channel] = mags;
+        }
+      }
+    }
+
+    if (channelMags.isEmpty) {
+      return null;
+    }
+    return (
+      sampleRateHz: sampleRateHz,
+      samplesRead: samplesRead,
+      binCount: binCount,
+      channelMags: channelMags,
+    );
+  }
+
   static const double _fftDisplayMinHz = 10.0;
   static const double _fftDisplayMaxHz = 5000.0;
   static const double _fftDisplayMinX = 1.0;
@@ -3131,9 +3372,26 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   }
 
   Widget _buildFftPanel({bool compact = false}) {
+    final _LoggedSample? replaySample = _currentReplaySample();
+    final ({
+      int sampleRateHz,
+      int samplesRead,
+      int binCount,
+      Map<String, List<double>> channelMags,
+    })?
+    replayFftPayload = replaySample == null
+        ? null
+        : _extractReplayFftPayload(replaySample);
+    final bool hasReplayFftPayload =
+        replayFftPayload != null &&
+        replayFftPayload.channelMags.containsKey(_fftChannel);
+
     // ── Prefer real FFT from bridge; fall back to Dart-computed FFT (mock) ──
+    // In replay mode, always derive FFT from replay history so playback affects FFT panel.
     final bool hasFrameFft =
-        _bridgeFftBinCount > 1 && _bridgeFftMags.containsKey(_fftChannel);
+        !_isReplayMode &&
+        _bridgeFftBinCount > 1 &&
+        _bridgeFftMags.containsKey(_fftChannel);
 
     List<double> freqs;
     List<double> mags;
@@ -3141,7 +3399,20 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     int samplesUsed;
     String sourceLabel;
 
-    if (hasFrameFft) {
+    if (hasReplayFftPayload) {
+      final List<double> rawMags = replayFftPayload.channelMags[_fftChannel]!;
+      mags = rawMags.length > 1 ? rawMags.sublist(1) : rawMags;
+      srHz = replayFftPayload.sampleRateHz.toDouble();
+      samplesUsed = replayFftPayload.samplesRead;
+      final int fftN = DaqFftFrame.nextPow2(
+        max(1, replayFftPayload.samplesRead),
+      );
+      freqs = List<double>.generate(
+        mags.length,
+        (int k) => (k + 1) * srHz / fftN,
+      );
+      sourceLabel = 'FFT replay (payload từ log)';
+    } else if (hasFrameFft) {
       final List<double> rawMags = _bridgeFftMags[_fftChannel]!;
       // Skip bin 0 (DC) — same as Dart path
       mags = rawMags.length > 1 ? rawMags.sublist(1) : rawMags;
@@ -3167,7 +3438,9 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       mags = r.mags;
       srHz = r.sampleRateHz;
       samplesUsed = r.samplesUsed;
-      sourceLabel = 'Dart FFT (demo / vỏ bao RMS)';
+      sourceLabel = _isReplayMode
+          ? 'Dart FFT (replay từ log)'
+          : 'Dart FFT (demo / vỏ bao RMS)';
     }
 
     final double peakMag = mags.isEmpty ? 0.0 : mags.reduce(max);
@@ -3236,7 +3509,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
               runSpacing: 4,
               children: <Widget>[
                 Text(
-                  'THÔNG TIN FFT ${hasFrameFft ? (_useBridge ? 'bridge' : 'khung-demo') : 'demo-du-phong'}',
+                  'THÔNG TIN FFT ${hasReplayFftPayload ? 'replay-payload' : (hasFrameFft ? (_useBridge ? 'bridge' : 'khung-demo') : 'demo-du-phong')}',
                   style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
@@ -3468,8 +3741,24 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   }
 
   Widget _buildWavePanel({bool compact = false}) {
+    final _LoggedSample? replaySample = _currentReplaySample();
+    final ({
+      int sampleRateHz,
+      int decimStep,
+      String unit,
+      Map<String, List<double>> channelSamples,
+    })?
+    replayWavePayload = replaySample == null
+        ? null
+        : _extractReplayWavePayload(replaySample);
+    final bool hasReplayWavePayload =
+        replayWavePayload != null &&
+        replayWavePayload.channelSamples.containsKey(_waveChannel);
+
     final List<double>? bridgeSamples = _bridgeWaveSamples[_waveChannel];
+    // In replay mode, ignore live bridge waveform and use replay timeline data.
     final bool hasFrameData =
+        !_isReplayMode &&
         bridgeSamples != null &&
         bridgeSamples.isNotEmpty &&
         _bridgeWaveSampleRateHz > 0;
@@ -3480,27 +3769,35 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     if (mockSamples.length > 240) {
       mockSamples.removeRange(0, mockSamples.length - 240);
     }
-    final bool hasMockData = !_useBridge && mockSamples.length > 1;
+    final bool hasMockData =
+        (_isReplayMode || !_useBridge) && mockSamples.length > 1;
 
-    final bool hasData = hasFrameData || hasMockData;
-    final List<double> activeSamples = hasFrameData
-        ? bridgeSamples
-        : mockSamples;
+    final bool hasData = hasReplayWavePayload || hasFrameData || hasMockData;
+    final List<double> activeSamples = hasReplayWavePayload
+        ? replayWavePayload.channelSamples[_waveChannel]!
+        : (hasFrameData ? bridgeSamples : mockSamples);
     final int outCount = activeSamples.length;
-    final double timeStepMs = hasFrameData
-        ? (_bridgeWaveDecimStep / _bridgeWaveSampleRateHz * 1000.0)
-        : _sampleIntervalMs.toDouble();
+    final double timeStepMs = hasReplayWavePayload
+        ? (replayWavePayload.decimStep /
+              replayWavePayload.sampleRateHz *
+              1000.0)
+        : (hasFrameData
+              ? (_bridgeWaveDecimStep / _bridgeWaveSampleRateHz * 1000.0)
+              : _sampleIntervalMs.toDouble());
     final double blockMs = hasData
         ? (outCount > 1 ? (outCount - 1) * timeStepMs : timeStepMs)
         : 100.0;
     final double clampedWindowMs = _clampWaveformTimeWindowMs(
       _waveformTimeWindowMs,
     );
-    final bool autoExpandWindowForMock = !hasFrameData;
+    final bool autoExpandWindowForMock =
+        !(hasReplayWavePayload || hasFrameData);
     final double displayTimeWindowMs = _clampWaveformTimeWindowMs(
       autoExpandWindowForMock ? max(blockMs, clampedWindowMs) : clampedWindowMs,
     );
-    final bool waveInVoltage = _useBridge && hasFrameData;
+    final bool waveInVoltage = hasReplayWavePayload
+        ? replayWavePayload.unit.toUpperCase() == 'V'
+        : (_useBridge && hasFrameData);
     final double minY = waveInVoltage ? _voltageMin : _chartMinG;
     final double maxY = waveInVoltage ? _voltageMax : _chartMaxG;
     final String yAxisLabel = waveInVoltage ? 'Điện áp (V)' : 'Biên độ (g)';
@@ -3622,10 +3919,10 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         const SizedBox(height: 8),
         if (hasData)
           Text(
-            'Dạng sóng (${hasFrameData ? 'bridge' : 'demo'})  |  N=$outCount  |  Fs: ${effectiveFsHz.toStringAsFixed(1)} Hz'
+            'Dạng sóng (${hasReplayWavePayload ? 'replay-payload' : (hasFrameData ? 'bridge' : 'demo')})  |  N=$outCount  |  Fs: ${effectiveFsHz.toStringAsFixed(1)} Hz'
             '  |  Khối: ${blockMs.toStringAsFixed(1)} ms'
             '  |  Cửa sổ: ${displayTimeWindowMs.toStringAsFixed(1)} ms'
-            '${hasFrameData ? '  |  Giảm mẫu: ×$_bridgeWaveDecimStep' : ''}',
+            '${hasReplayWavePayload ? '  |  Giảm mẫu: ×${replayWavePayload.decimStep}' : (hasFrameData ? '  |  Giảm mẫu: ×$_bridgeWaveDecimStep' : '')}',
             style: const TextStyle(fontSize: 11, color: Color(0xFF5E6A79)),
           ),
         if (!compact) ...<Widget>[
@@ -3643,7 +3940,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
               runSpacing: 4,
               children: <Widget>[
                 Text(
-                  'THÔNG TIN SÓNG ${waveInVoltage ? 'bridge' : 'demo'}',
+                  'THÔNG TIN SÓNG ${hasReplayWavePayload ? 'replay-payload' : (waveInVoltage ? 'bridge' : 'demo')}',
                   style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
