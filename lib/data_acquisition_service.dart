@@ -1,9 +1,6 @@
 import 'dart:async';
-import 'dart:math';
 
 import 'daq_bridge_client.dart';
-
-enum AcquisitionSource { mock, bridge }
 
 enum BridgeSignalUnit { voltage, accelerationG }
 
@@ -25,17 +22,29 @@ class AcquisitionSample {
   final DaqWaveFrame? waveFrame;
 }
 
+/// Orchestrates the NI-DAQmx bridge process and exposes a single unified
+/// stream of [AcquisitionSample] to the UI layer. The UI never talks to
+/// [DaqBridgeClient] or `Process` directly; this keeps the acquisition layer
+/// fully independent from the display layer.
 class DataAcquisitionService {
   DataAcquisitionService({required List<String> channels})
     : _channels = List<String>.from(channels) {
     _bridgeBlockSub = _bridgeClient.blockFrames.listen(_onBridgeBlockFrame);
     _bridgeFrameSub = _bridgeClient.frames.listen(_onBridgeFrame);
     _bridgeFftSub = _bridgeClient.fftFrames.listen((DaqFftFrame frame) {
+      // Bridge sends DATA_MULTI, FFT_MULTI and WAVE_MULTI as separate lines
+      // for the same block. Cache the latest FFT frame here so it can be
+      // attached to the AcquisitionSample built from DATA_MULTI below;
+      // otherwise the UI (which only listens to `samples`) never receives
+      // FFT data and the FFT panel stays empty.
+      _lastFftFrame = frame;
       if (!_fftController.isClosed) {
         _fftController.add(frame);
       }
     });
     _bridgeWaveSub = _bridgeClient.waveFrames.listen((DaqWaveFrame frame) {
+      // See comment above: cache latest waveform frame for the same reason.
+      _lastWaveFrame = frame;
       if (!_waveController.isClosed) {
         _waveController.add(frame);
       }
@@ -46,7 +55,6 @@ class DataAcquisitionService {
   }
 
   final List<String> _channels;
-  final Random _random = Random();
   final DaqBridgeClient _bridgeClient = DaqBridgeClient();
 
   final StreamController<AcquisitionSample> _sampleController =
@@ -63,67 +71,40 @@ class DataAcquisitionService {
   StreamSubscription<DaqWaveFrame>? _bridgeWaveSub;
   StreamSubscription<DaqBlockFrame>? _bridgeBlockSub;
   StreamSubscription<String>? _bridgeStatusSub;
-  Timer? _mockTimer;
 
-  AcquisitionSource _source = AcquisitionSource.mock;
+  // Latest FFT/waveform frames received via the standalone FFT_MULTI /
+  // WAVE_MULTI protocol lines (used by the current bridge, which does not
+  // emit combined BLOCK_MULTI lines). Cached so they can be attached to the
+  // AcquisitionSample built from the DATA_MULTI (RMS) frame.
+  DaqFftFrame? _lastFftFrame;
+  DaqWaveFrame? _lastWaveFrame;
+
   BridgeSignalUnit _bridgeSignalUnit = BridgeSignalUnit.voltage;
-  bool _isRunning = true;
-  bool _isMockConnected = true;
-  int _mockSampleRateHz = 10000;
-  int _mockSamplesPerRead = 1000;
-  int _mockSampleCursor = 0;
-  int _mockBlockCounter = 0;
 
-  // FFT in demo mode is CPU-heavy. Updating every few blocks keeps UI smooth
-  // while preserving responsive RMS/Wave displays.
-  static const int _mockFftEveryNBlocks = 3;
+  // Acquisition keeps running (process + stream parsing) even when
+  // `_isRunning` is false; this flag only gates whether parsed samples are
+  // forwarded to the UI. This is intentional: pausing the app in the UI
+  // must never stop or restart the underlying bridge process, and losing
+  // window focus / minimizing must never affect acquisition either.
+  bool _isRunning = true;
 
   Stream<AcquisitionSample> get samples => _sampleController.stream;
   Stream<String> get status => _statusController.stream;
 
-  /// FFT frames from active source (bridge or mock simulation).
+  /// FFT frames computed by the native/console bridge.
   Stream<DaqFftFrame> get fftFrames => _fftController.stream;
 
-  /// Waveform frames from active source (bridge or mock simulation).
+  /// Waveform frames computed by the native/console bridge.
   Stream<DaqWaveFrame> get waveFrames => _waveController.stream;
 
   bool get isBridgeRunning => _bridgeClient.isRunning;
-  bool get isMockConnected => _isMockConnected;
 
   void setRunning(bool value) {
     _isRunning = value;
   }
 
-  void setSource(AcquisitionSource source) {
-    _source = source;
-  }
-
   void setBridgeSignalUnit(BridgeSignalUnit unit) {
     _bridgeSignalUnit = unit;
-  }
-
-  void setMockConnected(bool connected) {
-    _isMockConnected = connected;
-  }
-
-  void setMockSamplingConfig({
-    required int sampleRateHz,
-    required int samplesPerRead,
-  }) {
-    if (sampleRateHz > 0) {
-      _mockSampleRateHz = sampleRateHz;
-    }
-    if (samplesPerRead > 0) {
-      _mockSamplesPerRead = samplesPerRead;
-    }
-  }
-
-  void startMock({required int intervalMs}) {
-    _mockTimer?.cancel();
-    _mockTimer = Timer.periodic(
-      Duration(milliseconds: intervalMs),
-      (_) => _emitMockSample(),
-    );
   }
 
   Future<void> startBridge({
@@ -138,7 +119,6 @@ class DataAcquisitionService {
   }
 
   Future<void> dispose() async {
-    _mockTimer?.cancel();
     _bridgeFrameSub?.cancel();
     _bridgeFftSub?.cancel();
     _bridgeWaveSub?.cancel();
@@ -151,192 +131,8 @@ class DataAcquisitionService {
     await _statusController.close();
   }
 
-  void _emitMockSample() {
-    if (_source != AcquisitionSource.mock || !_isRunning || !_isMockConnected) {
-      return;
-    }
-
-    _mockBlockCounter += 1;
-    final bool shouldEmitMockFft =
-        (_mockBlockCounter % _mockFftEveryNBlocks) == 0;
-
-    final int sampleRateHz = _mockSampleRateHz;
-    final int samplesPerRead = _mockSamplesPerRead;
-    final int fftSize = DaqFftFrame.nextPow2(samplesPerRead);
-    final int decimStep = max(1, samplesPerRead ~/ 200);
-    final double blockStartSec = _mockSampleCursor / sampleRateHz;
-
-    final Map<String, double> values = <String, double>{};
-    final Map<String, double> rawRmsVolts = <String, double>{};
-    final List<List<double>> waveChannelSamples = List<List<double>>.generate(
-      _channels.length,
-      (_) => <double>[],
-    );
-    final List<double> flatFftMagnitudes = <double>[];
-
-    for (int i = 0; i < _channels.length; i++) {
-      final String channel = _channels[i];
-      final double lowFreqHz = 110.0 + i * 8.0;
-      final double midFreqHz = 280.0 + i * 14.0;
-      final double amp1 = 0.30 + (i % 4) * 0.02;
-      final double amp2 = 0.18 + (i % 3) * 0.015;
-      final double phase = i * 0.4;
-      final double env1 =
-          1.0 + 0.55 * sin(2 * pi * (0.65 + i * 0.02) * blockStartSec + phase);
-      final double env2 =
-          1.0 +
-          0.45 * sin(2 * pi * (1.15 + i * 0.015) * blockStartSec + phase * 0.8);
-
-      final List<double> channelBlock = List<double>.filled(
-        samplesPerRead,
-        0.0,
-      );
-      double sumSq = 0.0;
-
-      for (int n = 0; n < samplesPerRead; n++) {
-        final double t = (_mockSampleCursor + n) / sampleRateHz;
-        final double noise = (_random.nextDouble() - 0.5) * 0.09;
-        final bool hasImpulse = _random.nextDouble() < 0.0018;
-        final double impulse = hasImpulse
-            ? ((_random.nextDouble() - 0.5) * 0.7)
-            : 0.0;
-        final double drift = 0.08 * sin(2 * pi * 0.22 * t + phase * 0.35);
-        final double sample =
-            0.40 +
-            (amp1 * env1) * sin(2 * pi * lowFreqHz * t + phase) +
-            (amp2 * env2) * sin(2 * pi * midFreqHz * t + phase * 0.7) +
-            drift +
-            noise +
-            impulse;
-        final double clamped = sample.clamp(0.0, 1.2).toDouble();
-        channelBlock[n] = clamped;
-        sumSq += clamped * clamped;
-      }
-
-      final double rms = sqrt(sumSq / samplesPerRead);
-      values[channel] = rms;
-      rawRmsVolts[channel] = rms;
-
-      final List<double> decimated = <double>[];
-      for (int n = 0; n < samplesPerRead; n += decimStep) {
-        decimated.add(channelBlock[n]);
-      }
-      waveChannelSamples[i] = decimated;
-
-      if (shouldEmitMockFft) {
-        final List<double> padded = List<double>.filled(fftSize, 0.0);
-        for (int n = 0; n < samplesPerRead; n++) {
-          padded[n] = channelBlock[n];
-        }
-        final List<double> mags = _fftMagnitudes(padded);
-        flatFftMagnitudes.addAll(mags);
-      }
-    }
-
-    _mockSampleCursor += samplesPerRead;
-
-    final DaqFftFrame? mockFftFrame = shouldEmitMockFft
-        ? DaqFftFrame(
-            sampleRateHz: sampleRateHz,
-            samplesRead: samplesPerRead,
-            channelCount: _channels.length,
-            binCount: fftSize ~/ 2,
-            magnitudes: flatFftMagnitudes,
-          )
-        : null;
-
-    _sampleController.add(
-      AcquisitionSample(
-        values: values,
-        rawRmsVolts: rawRmsVolts,
-        sampleRateHz: sampleRateHz,
-        samplesRead: samplesPerRead,
-        fftFrame: mockFftFrame,
-        waveFrame: DaqWaveFrame(
-          sampleRateHz: sampleRateHz,
-          samplesRead: samplesPerRead,
-          decimStep: decimStep,
-          channelCount: _channels.length,
-          channelSamples: waveChannelSamples,
-        ),
-      ),
-    );
-
-    if (!_waveController.isClosed) {
-      _waveController.add(
-        DaqWaveFrame(
-          sampleRateHz: sampleRateHz,
-          samplesRead: samplesPerRead,
-          decimStep: decimStep,
-          channelCount: _channels.length,
-          channelSamples: waveChannelSamples,
-        ),
-      );
-    }
-
-    if (mockFftFrame != null && !_fftController.isClosed) {
-      _fftController.add(mockFftFrame);
-    }
-  }
-
-  List<double> _fftMagnitudes(List<double> input) {
-    final int n = input.length;
-    final List<double> re = List<double>.from(input);
-    final List<double> im = List<double>.filled(n, 0.0);
-
-    int j = 0;
-    for (int i = 1; i < n; i++) {
-      int bit = n >> 1;
-      while ((j & bit) != 0) {
-        j ^= bit;
-        bit >>= 1;
-      }
-      j ^= bit;
-      if (i < j) {
-        final double tmpRe = re[i];
-        re[i] = re[j];
-        re[j] = tmpRe;
-        final double tmpIm = im[i];
-        im[i] = im[j];
-        im[j] = tmpIm;
-      }
-    }
-
-    for (int len = 2; len <= n; len <<= 1) {
-      final double ang = -2 * pi / len;
-      final double wRe = cos(ang);
-      final double wIm = sin(ang);
-      for (int i = 0; i < n; i += len) {
-        double curRe = 1.0;
-        double curIm = 0.0;
-        for (int k = 0; k < len ~/ 2; k++) {
-          final double uRe = re[i + k];
-          final double uIm = im[i + k];
-          final double vRe =
-              re[i + k + len ~/ 2] * curRe - im[i + k + len ~/ 2] * curIm;
-          final double vIm =
-              re[i + k + len ~/ 2] * curIm + im[i + k + len ~/ 2] * curRe;
-          re[i + k] = uRe + vRe;
-          im[i + k] = uIm + vIm;
-          re[i + k + len ~/ 2] = uRe - vRe;
-          im[i + k + len ~/ 2] = uIm - vIm;
-          final double nextRe = curRe * wRe - curIm * wIm;
-          curIm = curRe * wIm + curIm * wRe;
-          curRe = nextRe;
-        }
-      }
-    }
-
-    final int half = n ~/ 2;
-    final List<double> magnitudes = List<double>.filled(half, 0.0);
-    for (int k = 0; k < half; k++) {
-      magnitudes[k] = sqrt(re[k] * re[k] + im[k] * im[k]) / half;
-    }
-    return magnitudes;
-  }
-
   void _onBridgeFrame(DaqFrame frame) {
-    if (_source != AcquisitionSource.bridge || !_isRunning) {
+    if (!_isRunning) {
       return;
     }
 
@@ -367,12 +163,14 @@ class DataAcquisitionService {
         rawRmsVolts: rawRmsVolts,
         sampleRateHz: frame.sampleRateHz,
         samplesRead: frame.samplesRead,
+        fftFrame: _lastFftFrame,
+        waveFrame: _lastWaveFrame,
       ),
     );
   }
 
   void _onBridgeBlockFrame(DaqBlockFrame block) {
-    if (_source != AcquisitionSource.bridge || !_isRunning) {
+    if (!_isRunning) {
       return;
     }
 

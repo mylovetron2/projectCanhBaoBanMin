@@ -3,8 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:flutter/services.dart';
-
 class DaqFrame {
   DaqFrame({
     required this.sampleRateHz,
@@ -26,23 +24,14 @@ class DaqFftFrame {
     required this.magnitudes,
   });
 
-  /// Hardware sample rate in Hz (e.g. 10000).
   final int sampleRateHz;
-
-  /// Number of raw samples per block (used to compute fftSize = nextPow2(samplesRead)).
   final int samplesRead;
   final int channelCount;
-
-  /// Frequency-domain bins per channel. Total magnitudes.length == channelCount * binCount.
   final int binCount;
-
-  /// Channel-major flat array: [ch0_b0, ch0_b1, ..., ch1_b0, ...].
   final List<double> magnitudes;
 
-  /// Frequency in Hz for bin index [k].
   double freqHz(int k) => k * sampleRateHz / _nextPow2(samplesRead).toDouble();
 
-  /// Magnitude list for channel [chIdx].
   List<double> channelMags(int chIdx) =>
       magnitudes.sublist(chIdx * binCount, (chIdx + 1) * binCount);
 
@@ -54,8 +43,6 @@ class DaqFftFrame {
     return p;
   }
 
-  // Expose for use in UI layer.
-  // ignore: library_private_types_in_public_api
   static int nextPow2(int n) => _nextPow2(n);
 }
 
@@ -70,15 +57,10 @@ class DaqWaveFrame {
 
   final int sampleRateHz;
   final int samplesRead;
-
-  /// Decimation step used by the C bridge (e.g. 5 → every 5th sample).
   final int decimStep;
   final int channelCount;
-
-  /// Raw sample values per channel: channelSamples[ch][i].
   final List<List<double>> channelSamples;
 
-  /// Time in seconds for decimated sample index [i].
   double timeMs(int i) => (i * decimStep) / sampleRateHz * 1000.0;
 }
 
@@ -135,17 +117,6 @@ class DaqBlockFrame {
 }
 
 class DaqBridgeClient {
-  static const MethodChannel _nativeMethodChannel = MethodChannel(
-    'mine_alert/daq_bridge_method',
-  );
-  static const EventChannel _nativeEventChannel = EventChannel(
-    'mine_alert/daq_bridge_events',
-  );
-  static const int _blockBinaryMagic = 0x314b4c42; // "BLK1" little-endian
-  static const int _blockBinaryVersion = 1;
-  static const int _blockBinaryHeaderU32Count = 9;
-  static const int _blockBinaryFlagHasRawInterleaved = 1;
-
   final StreamController<DaqFrame> _frameController =
       StreamController<DaqFrame>.broadcast();
   final StreamController<DaqFftFrame> _fftFrameController =
@@ -158,10 +129,8 @@ class DaqBridgeClient {
       StreamController<String>.broadcast();
 
   Process? _process;
-  StreamSubscription<dynamic>? _nativeEventSub;
   StreamSubscription<String>? _stdoutSub;
   StreamSubscription<String>? _stderrSub;
-  bool _nativeRunning = false;
   bool _isDisposed = false;
 
   Stream<DaqFrame> get frames => _frameController.stream;
@@ -170,7 +139,7 @@ class DaqBridgeClient {
   Stream<DaqBlockFrame> get blockFrames => _blockFrameController.stream;
   Stream<String> get status => _statusController.stream;
 
-  bool get isRunning => Platform.isWindows ? _nativeRunning : _process != null;
+  bool get isRunning => _process != null;
 
   Future<void> start({
     required String executablePath,
@@ -181,23 +150,6 @@ class DaqBridgeClient {
     }
 
     if (isRunning) {
-      return;
-    }
-
-    if (Platform.isWindows) {
-      await _ensureNativeEventSubscription();
-      try {
-        await _nativeMethodChannel.invokeMethod<void>(
-          'startBridge',
-          <String, Object?>{'executablePath': executablePath, 'args': args},
-        );
-        _nativeRunning = true;
-        _emitStatus('Bridge started (in-process Windows NI-DAQmx)');
-      } catch (error) {
-        _nativeRunning = false;
-        _emitStatus('Bridge start failed: $error');
-        rethrow;
-      }
       return;
     }
 
@@ -238,21 +190,6 @@ class DaqBridgeClient {
   }
 
   Future<void> stop() async {
-    if (Platform.isWindows) {
-      if (!_nativeRunning) {
-        return;
-      }
-
-      try {
-        await _nativeMethodChannel.invokeMethod<void>('stopBridge');
-      } catch (_) {
-        // Ignore stop errors; bridge state is best-effort during shutdown.
-      }
-      _nativeRunning = false;
-      _emitStatus('Bridge stopped');
-      return;
-    }
-
     final Process? process = _process;
     if (process == null) {
       return;
@@ -260,7 +197,6 @@ class DaqBridgeClient {
 
     try {
       if (Platform.isWindows) {
-        // Kill process tree to avoid orphan DAQ bridge after app closes.
         await Process.run('taskkill', <String>[
           '/PID',
           process.pid.toString(),
@@ -300,7 +236,6 @@ class DaqBridgeClient {
     }
     _isDisposed = true;
     await stop();
-    await _nativeEventSub?.cancel();
     await _frameController.close();
     await _fftFrameController.close();
     await _waveFrameController.close();
@@ -355,11 +290,11 @@ class DaqBridgeClient {
 
     if (line.startsWith('FFT_MULTI,')) {
       final List<String> parts = line.split(',');
-      // Header: FFT_MULTI,<rate>,<samplesRead>,<channelCount>,<binCount>  → 5 fields
       if (parts.length < 6) {
         _emitStatus('Malformed FFT_MULTI: insufficient fields');
         return;
       }
+
       final int? rate = int.tryParse(parts[1]);
       final int? samplesRead = int.tryParse(parts[2]);
       final int? channelCount = int.tryParse(parts[3]);
@@ -371,6 +306,7 @@ class DaqBridgeClient {
         _emitStatus('FFT_MULTI invalid header values');
         return;
       }
+
       final int expected = 5 + channelCount * binCount;
       if (parts.length != expected) {
         _emitStatus(
@@ -378,6 +314,7 @@ class DaqBridgeClient {
         );
         return;
       }
+
       final List<double> mags = List<double>.filled(
         channelCount * binCount,
         0.0,
@@ -390,6 +327,7 @@ class DaqBridgeClient {
         }
         mags[i] = v;
       }
+
       if (!_fftFrameController.isClosed) {
         _fftFrameController.add(
           DaqFftFrame(
@@ -406,11 +344,11 @@ class DaqBridgeClient {
 
     if (line.startsWith('BLOCK_MULTI,')) {
       final List<String> parts = line.split(',');
-      // Header: BLOCK_MULTI,<rate>,<samplesRead>,<channelCount>,<binCount>,<decimStep>
       if (parts.length < 7) {
         _emitStatus('Malformed BLOCK_MULTI: insufficient fields');
         return;
       }
+
       final int? rate = int.tryParse(parts[1]);
       final int? samplesRead = int.tryParse(parts[2]);
       final int? channelCount = int.tryParse(parts[3]);
@@ -467,9 +405,10 @@ class DaqBridgeClient {
         channelCount,
         (int ch) {
           final int offset = waveStart + ch * outCount;
-          return List<double>.generate(outCount, (int i) {
-            return double.tryParse(parts[offset + i]) ?? 0.0;
-          });
+          return List<double>.generate(
+            outCount,
+            (int i) => double.tryParse(parts[offset + i]) ?? 0.0,
+          );
         },
       );
 
@@ -492,8 +431,10 @@ class DaqBridgeClient {
 
     if (line.startsWith('WAVE_MULTI,')) {
       final List<String> parts = line.split(',');
-      // Header: WAVE_MULTI,<rate>,<samplesRead>,<channelCount>,<decimStep> → 5 fields
-      if (parts.length < 6) return;
+      if (parts.length < 6) {
+        return;
+      }
+
       final int? rate = int.tryParse(parts[1]);
       final int? samplesRead = int.tryParse(parts[2]);
       final int? channelCount = int.tryParse(parts[3]);
@@ -505,8 +446,12 @@ class DaqBridgeClient {
           decimStep <= 0) {
         return;
       }
+
       final int outCount = (samplesRead + decimStep - 1) ~/ decimStep;
-      if (parts.length != 5 + channelCount * outCount) return;
+      if (parts.length != 5 + channelCount * outCount) {
+        return;
+      }
+
       final List<List<double>> channelSamples = List<List<double>>.generate(
         channelCount,
         (int ch) {
@@ -517,6 +462,7 @@ class DaqBridgeClient {
           );
         },
       );
+
       if (!_waveFrameController.isClosed) {
         _waveFrameController.add(
           DaqWaveFrame(
@@ -566,156 +512,12 @@ class DaqBridgeClient {
     _emitStatus(line);
   }
 
-  void _parseBinaryEvent(Uint8List payload) {
-    final int headerBytes = _blockBinaryHeaderU32Count * 4;
-    if (payload.lengthInBytes < headerBytes) {
-      _emitStatus('Malformed BLOCK_BIN: payload too small');
-      return;
-    }
-
-    final ByteData bytes = ByteData.sublistView(payload);
-    final int magic = bytes.getUint32(0, Endian.little);
-    final int version = bytes.getUint32(4, Endian.little);
-    if (magic != _blockBinaryMagic || version != _blockBinaryVersion) {
-      _emitStatus('Unknown binary bridge payload (magic/version mismatch)');
-      return;
-    }
-
-    final int sampleRateHz = bytes.getUint32(8, Endian.little);
-    final int samplesRead = bytes.getUint32(12, Endian.little);
-    final int channelCount = bytes.getUint32(16, Endian.little);
-    final int binCount = bytes.getUint32(20, Endian.little);
-    final int decimStep = bytes.getUint32(24, Endian.little);
-    final int outCount = bytes.getUint32(28, Endian.little);
-    final int flags = bytes.getUint32(32, Endian.little);
-
-    if (sampleRateHz <= 0 ||
-        samplesRead <= 0 ||
-        channelCount <= 0 ||
-        binCount <= 0 ||
-        decimStep <= 0 ||
-        outCount <= 0) {
-      _emitStatus('Invalid BLOCK_BIN header values');
-      return;
-    }
-
-    final int rmsCount = channelCount;
-    final int fftCount = channelCount * binCount;
-    final int waveCount = channelCount * outCount;
-    final bool hasRaw = (flags & _blockBinaryFlagHasRawInterleaved) != 0;
-    final int rawCount = hasRaw ? channelCount * samplesRead : 0;
-    final int totalFloats = rmsCount + fftCount + waveCount + rawCount;
-    final int expectedBytes = headerBytes + totalFloats * 4;
-    if (payload.lengthInBytes != expectedBytes) {
-      _emitStatus(
-        'BLOCK_BIN size mismatch: got ${payload.lengthInBytes}, expected $expectedBytes',
-      );
-      return;
-    }
-
-    int offset = headerBytes;
-    final List<double> rmsValues = List<double>.filled(rmsCount, 0.0);
-    for (int i = 0; i < rmsCount; i++) {
-      rmsValues[i] = bytes.getFloat32(offset, Endian.little).toDouble();
-      offset += 4;
-    }
-
-    final List<double> mags = List<double>.filled(fftCount, 0.0);
-    for (int i = 0; i < fftCount; i++) {
-      mags[i] = bytes.getFloat32(offset, Endian.little).toDouble();
-      offset += 4;
-    }
-
-    final List<List<double>> channelSamples = List<List<double>>.generate(
-      channelCount,
-      (_) => List<double>.filled(outCount, 0.0),
-    );
-    for (int ch = 0; ch < channelCount; ch++) {
-      for (int i = 0; i < outCount; i++) {
-        channelSamples[ch][i] = bytes
-            .getFloat32(offset, Endian.little)
-            .toDouble();
-        offset += 4;
-      }
-    }
-
-    Float32List? rawInterleaved;
-    if (hasRaw) {
-      rawInterleaved = Float32List(rawCount);
-      for (int i = 0; i < rawCount; i++) {
-        rawInterleaved[i] = bytes.getFloat32(offset, Endian.little);
-        offset += 4;
-      }
-    }
-
-    final DaqBlockFrame block = DaqBlockFrame(
-      sampleRateHz: sampleRateHz,
-      samplesRead: samplesRead,
-      channelCount: channelCount,
-      binCount: binCount,
-      decimStep: decimStep,
-      channelRmsValues: rmsValues,
-      magnitudes: mags,
-      channelSamples: channelSamples,
-      rawInterleavedSamples: rawInterleaved,
-    );
-
-    if (!_blockFrameController.isClosed) {
-      _blockFrameController.add(block);
-    }
-  }
-
   void _disposeProcessOnly() {
     unawaited(_stdoutSub?.cancel());
     unawaited(_stderrSub?.cancel());
     _stdoutSub = null;
     _stderrSub = null;
     _process = null;
-  }
-
-  Future<void> _ensureNativeEventSubscription() async {
-    if (_nativeEventSub != null) {
-      return;
-    }
-
-    _nativeEventSub = _nativeEventChannel.receiveBroadcastStream().listen(
-      (dynamic event) {
-        if (event is Uint8List) {
-          _parseBinaryEvent(event);
-          return;
-        }
-        if (event is String) {
-          _handleNativeEvent(event);
-        } else {
-          _emitStatus('Bridge event: $event');
-        }
-      },
-      onError: (Object error) {
-        _nativeRunning = false;
-        _emitStatus('Bridge event error: $error');
-      },
-      onDone: () {
-        _nativeRunning = false;
-      },
-    );
-  }
-
-  void _handleNativeEvent(String line) {
-    if (line.startsWith('BRIDGE_STARTED,')) {
-      _nativeRunning = true;
-      _emitStatus(line);
-      return;
-    }
-
-    if (line.startsWith('BRIDGE_STOPPED,')) {
-      _nativeRunning = false;
-      final List<String> parts = line.split(',');
-      final String code = parts.length > 1 ? parts[1] : '0';
-      _emitStatus('Bridge exited with code $code');
-      return;
-    }
-
-    _parseLine(line);
   }
 
   void _emitStatus(String message) {
@@ -725,3 +527,5 @@ class DaqBridgeClient {
     _statusController.add(message);
   }
 }
+
+// Header: WAVE_MULTI,<rate>,<samplesRead>,<channelCount>,<decimStep> → 5 fields

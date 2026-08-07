@@ -12,6 +12,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'daq_bridge_client.dart';
 import 'data_acquisition_service.dart';
+import 'fft_bar_chart.dart';
 
 void main() {
   runApp(const MyApp());
@@ -359,7 +360,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   static const String _prefBridgeArgs = 'settings.bridgeArgs';
   static const String _prefVoltageMin = 'settings.voltageMin';
   static const String _prefVoltageMax = 'settings.voltageMax';
-  static const String _prefUseBridge = 'settings.useBridge';
   static const String _prefChartMinG = 'settings.chartMinG';
   static const String _prefChartMaxG = 'settings.chartMaxG';
   static const String _prefWaveformTimeWindowMs =
@@ -380,6 +380,10 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       'settings.lastAutoFallbackReason';
   static const String _prefDataLoggingEnabled = 'settings.dataLoggingEnabled';
   static const String _prefRecentLoggedSamples = 'settings.recentLoggedSamples';
+  static const String _prefShowCombinedPanel = 'settings.showCombinedPanel';
+  static const String _prefShowFftPanel = 'settings.showFftPanel';
+  static const String _prefShowWavePanel = 'settings.showWavePanel';
+  static const String _prefUiRefreshFps = 'settings.uiRefreshFps';
 
   final List<String> _channels = List.generate(16, (index) => 'AI$index');
   final Map<String, List<FlSpot>> _history = <String, List<FlSpot>>{};
@@ -397,7 +401,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
 
   bool _isRunning = true;
   bool _isConnected = false;
-  bool _useBridge = true;
+  bool _isConnectionBusy = false;
   bool _dataLoggingEnabled = true;
   bool _dataLoggingBlinkOn = true;
   DateTime? _dataLoggingSessionStartAt;
@@ -416,9 +420,12 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   int _selectedScreenIndex = 0;
   int _selectedCombinedWindowMinutes = -1;
   _EventLogFilter _selectedEventLogFilter = _EventLogFilter.all;
-  String _fftChannel = 'AI0';
+  bool _showCombinedPanel = true;
+  bool _showFftPanel = true;
+  bool _showWavePanel = true;
+  int _uiRefreshFps = 30;
 
-  // Latest FFT from C bridge (bridge mode only; empty in mock mode)
+  // Latest FFT block received from the NI-DAQmx bridge process.
   final Map<String, List<double>> _bridgeFftMags = <String, List<double>>{};
   int _bridgeFftSampleRateHz = 0;
   int _bridgeFftBinCount = 0;
@@ -469,6 +476,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   late final TextEditingController _waveformTimeWindowMinController;
   late final TextEditingController _waveformTimeWindowMaxController;
   Timer? _dataLogSaveDebounce;
+  Timer? _settingsSaveDebounce;
   Timer? _dataLoggingBlinkTimer;
   Directory? _dataLogDirectory;
   Timer? _replayTimer;
@@ -480,8 +488,10 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   String? _replayFilePath;
   List<_BinaryTimeIndexEntry> _replayTimeIndex = <_BinaryTimeIndexEntry>[];
   int _replayIndexStride = 1;
+  DateTime _lastUiSampleFrameAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   static const Duration _historyRetention = Duration(hours: 4);
+  static const List<int> _uiRefreshFpsOptions = <int>[15, 30, 60];
   static const int _maxRecentDataLogs = 200;
   static const String _binaryLogExtension = 'smm';
   static const String _binaryLogMagic = 'MALOGB03';
@@ -540,6 +550,12 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     Color(0xFFEDC948),
   ];
 
+  Duration get _uiMinFrameInterval {
+    final int fps = _uiRefreshFps <= 0 ? 30 : _uiRefreshFps;
+    final int frameMs = (1000 / fps).round().clamp(8, 1000);
+    return Duration(milliseconds: frameMs);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -592,20 +608,26 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         unawaited(_autoFallbackToVoltageMode());
       }
 
-      setState(() {
-        if (line.startsWith('Bridge exited with code') ||
-            line.startsWith('ERROR,')) {
+      bool shouldRefreshUi = false;
+      if (line.startsWith('Bridge exited with code') ||
+          line.startsWith('ERROR,')) {
+        if (_isConnected) {
           _isConnected = false;
+          shouldRefreshUi = true;
         }
+      }
 
-        _eventLogs.insert(0, '[${DateTime.now().toLocal()}] $line');
-        if (_eventLogs.length > 80) {
-          _eventLogs.removeRange(80, _eventLogs.length);
-        }
-      });
+      _eventLogs.insert(0, '[${DateTime.now().toLocal()}] $line');
+      if (_eventLogs.length > 80) {
+        _eventLogs.removeRange(80, _eventLogs.length);
+      }
+
+      if (_selectedScreenIndex == 2 || shouldRefreshUi) {
+        setState(() {});
+      }
     });
 
-    _startAcquisition();
+    _updateSampleIntervalEstimate();
     unawaited(_initializeStartup());
   }
 
@@ -618,20 +640,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   }
 
   void _initializeSourceOnStartup() {
-    _acquisitionService.setSource(
-      _useBridge ? AcquisitionSource.bridge : AcquisitionSource.mock,
-    );
-    if (_useBridge) {
-      unawaited(_toggleConnection());
-      return;
-    }
-
-    _acquisitionService.setMockConnected(true);
-    setState(() {
-      _isConnected = true;
-      _actualSampleRateHz = null;
-      _actualSamplesPerRead = null;
-    });
+    unawaited(_connectConnection(trigger: 'khoi dong ung dung'));
   }
 
   @override
@@ -640,6 +649,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     _sampleSub?.cancel();
     _statusSub?.cancel();
     _dataLogSaveDebounce?.cancel();
+    _settingsSaveDebounce?.cancel();
     _dataLoggingBlinkTimer?.cancel();
     unawaited(_finalizeDataLoggingSession());
     _stopReplayTimer();
@@ -664,6 +674,10 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Intentionally does NOT pause/stop the bridge process or acquisition
+    // stream here. The NI-DAQmx bridge runs as an independent OS process and
+    // must keep acquiring/logging data even when the window loses focus or
+    // is minimized; only settings persistence happens on these transitions.
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached ||
@@ -948,9 +962,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   }
 
   Future<void> _autoFallbackToVoltageMode() async {
-    if (!mounted ||
-        !_useBridge ||
-        _aiChannelMode != BridgeAiChannelMode.accel) {
+    if (!mounted || _aiChannelMode != BridgeAiChannelMode.accel) {
       return;
     }
 
@@ -1037,7 +1049,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     final String? savedArgs = prefs.getString(_prefBridgeArgs);
     final double? savedMin = prefs.getDouble(_prefVoltageMin);
     final double? savedMax = prefs.getDouble(_prefVoltageMax);
-    final bool? savedUseBridge = prefs.getBool(_prefUseBridge);
     final double? savedChartMin = prefs.getDouble(_prefChartMinG);
     final double? savedChartMax = prefs.getDouble(_prefChartMaxG);
     final double? savedWaveWindow = prefs.getDouble(_prefWaveformTimeWindowMs);
@@ -1059,6 +1070,10 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     final bool? savedDataLoggingEnabled = prefs.getBool(
       _prefDataLoggingEnabled,
     );
+    final bool? savedShowCombinedPanel = prefs.getBool(_prefShowCombinedPanel);
+    final bool? savedShowFftPanel = prefs.getBool(_prefShowFftPanel);
+    final bool? savedShowWavePanel = prefs.getBool(_prefShowWavePanel);
+    final int? savedUiRefreshFps = prefs.getInt(_prefUiRefreshFps);
     final List<String> savedLoggedSamples =
         prefs.getStringList(_prefRecentLoggedSamples) ?? const <String>[];
 
@@ -1078,9 +1093,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       }
       if (savedMax != null) {
         _voltageMax = savedMax;
-      }
-      if (savedUseBridge != null) {
-        _useBridge = savedUseBridge;
       }
       if (savedChartMin != null) {
         _chartMinG = savedChartMin;
@@ -1136,6 +1148,19 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       }
       if (savedDataLoggingEnabled != null) {
         _dataLoggingEnabled = savedDataLoggingEnabled;
+      }
+      if (savedShowCombinedPanel != null) {
+        _showCombinedPanel = savedShowCombinedPanel;
+      }
+      if (savedShowFftPanel != null) {
+        _showFftPanel = savedShowFftPanel;
+      }
+      if (savedShowWavePanel != null) {
+        _showWavePanel = savedShowWavePanel;
+      }
+      if (savedUiRefreshFps != null &&
+          _uiRefreshFpsOptions.contains(savedUiRefreshFps)) {
+        _uiRefreshFps = savedUiRefreshFps;
       }
       _dataLogs
         ..clear()
@@ -1227,7 +1252,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     await prefs.setString(_prefBridgeArgs, _bridgeArguments);
     await prefs.setDouble(_prefVoltageMin, _voltageMin);
     await prefs.setDouble(_prefVoltageMax, _voltageMax);
-    await prefs.setBool(_prefUseBridge, _useBridge);
     await prefs.setDouble(_prefChartMinG, _chartMinG);
     await prefs.setDouble(_prefChartMaxG, _chartMaxG);
     await prefs.setDouble(_prefWaveformTimeWindowMs, _waveformTimeWindowMs);
@@ -1244,6 +1268,10 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     await prefs.setString(_prefAiChannelMode, _aiModeFlagValue(_aiChannelMode));
     await prefs.setString(_prefAccelPresetId, _selectedAccelPresetId);
     await prefs.setBool(_prefDataLoggingEnabled, _dataLoggingEnabled);
+    await prefs.setBool(_prefShowCombinedPanel, _showCombinedPanel);
+    await prefs.setBool(_prefShowFftPanel, _showFftPanel);
+    await prefs.setBool(_prefShowWavePanel, _showWavePanel);
+    await prefs.setInt(_prefUiRefreshFps, _uiRefreshFps);
     await prefs.setDouble(
       _prefAccelSensitivityMvPerG,
       _customAccelSensitivityMvPerG,
@@ -1792,6 +1820,15 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     });
   }
 
+  void _scheduleSaveSettings({
+    Duration delay = const Duration(milliseconds: 250),
+  }) {
+    _settingsSaveDebounce?.cancel();
+    _settingsSaveDebounce = Timer(delay, () {
+      unawaited(_saveSettings());
+    });
+  }
+
   Future<void> _persistRecentDataLogs({SharedPreferences? prefs}) async {
     final SharedPreferences resolvedPrefs =
         prefs ?? await SharedPreferences.getInstance();
@@ -2239,13 +2276,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       _trimLogs();
     });
 
-    _acquisitionService.setMockSamplingConfig(
-      sampleRateHz: _sampleRateHz,
-      samplesPerRead: _samplesPerRead,
-    );
-    if (!_useBridge) {
-      _startAcquisition();
-    }
+    _updateSampleIntervalEstimate();
 
     unawaited(_saveSettings());
   }
@@ -2321,17 +2352,15 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     unawaited(_saveSettings());
   }
 
-  void _startAcquisition() {
-    _acquisitionService.setMockSamplingConfig(
-      sampleRateHz: _sampleRateHz,
-      samplesPerRead: _samplesPerRead,
-    );
+  /// Estimates block duration (ms) from the configured sample rate and
+  /// samples-per-read. Used only as a UI fallback timescale for the
+  /// waveform panel before any real bridge frame has arrived.
+  void _updateSampleIntervalEstimate() {
     final int intervalMs = max(
       20,
       ((_samplesPerRead * 1000) / _sampleRateHz).round(),
     );
     _sampleIntervalMs = intervalMs;
-    _acquisitionService.startMock(intervalMs: intervalMs);
   }
 
   void _toggleRun() {
@@ -2360,10 +2389,8 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       builder: (BuildContext dialogContext) {
         return AlertDialog(
           title: const Text('Ngắt kết nối nguồn dữ liệu?'),
-          content: Text(
-            _useBridge
-                ? 'Dừng tiến trình bridge NI-DAQmx và ngắt kết nối ngay bây giờ?'
-                : 'Ngắt kết nối demo ngay bây giờ?',
+          content: const Text(
+            'Dừng tiến trình bridge NI-DAQmx và ngắt kết nối ngay bây giờ?',
           ),
           actions: <Widget>[
             TextButton(
@@ -2389,20 +2416,14 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   Future<void> _connectConnection({
     String trigger = 'thao tác người dùng',
   }) async {
-    if (!_useBridge) {
-      setState(() {
-        _isConnected = true;
-        _actualSampleRateHz = null;
-        _actualSamplesPerRead = null;
-        _acquisitionService.setMockConnected(true);
-        _eventLogs.insert(
-          0,
-          '[${DateTime.now().toLocal()}] Đã kết nối demo ($trigger)',
-        );
-        _trimLogs();
-      });
-      _showActionMessage('Đã kết nối demo.');
+    if (_isConnectionBusy) {
       return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _isConnectionBusy = true;
+      });
     }
 
     if (_acquisitionService.isBridgeRunning) {
@@ -2412,6 +2433,11 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       setState(() {
         _isConnected = true;
       });
+      if (mounted) {
+        setState(() {
+          _isConnectionBusy = false;
+        });
+      }
       return;
     }
 
@@ -2420,13 +2446,37 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         setState(() {
           _eventLogs.insert(
             0,
-            '[${DateTime.now().toLocal()}] Đường dẫn bridge trống. Hãy giữ chế độ demo hoặc đặt đường dẫn hợp lệ.',
+            '[${DateTime.now().toLocal()}] Đường dẫn bridge trống. Hãy đặt đường dẫn hợp lệ.',
           );
           _isConnected = false;
           _trimLogs();
         });
         _showActionMessage('Đường dẫn bridge đang trống.');
+        if (mounted) {
+          setState(() {
+            _isConnectionBusy = false;
+          });
+        }
         return;
+      }
+
+      String bridgeArgs = _bridgeArguments;
+      final int? requestedRate = _extractIntFlagFromArgs(bridgeArgs, '--rate');
+      if (requestedRate != null && requestedRate > 0 && requestedRate < 10000) {
+        bridgeArgs = _upsertBridgeFlag(bridgeArgs, '--rate', '10000');
+        if (mounted) {
+          setState(() {
+            _bridgeArguments = bridgeArgs;
+            _bridgeArgsController.text = bridgeArgs;
+            _sampleRateHz = 10000;
+            _sampleRateController.text = '10000';
+            _eventLogs.insert(
+              0,
+              '[${DateTime.now().toLocal()}] Tu dong doi --rate $requestedRate -> 10000 de FFT hien thi den 5000 Hz (Nyquist).',
+            );
+            _trimLogs();
+          });
+        }
       }
 
       await _acquisitionService.startBridge(
@@ -2435,7 +2485,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
           _aiChannelMode == BridgeAiChannelMode.accel
               ? _upsertBridgeFlag(
                   _upsertBridgeFlag(
-                    _bridgeArguments,
+                    bridgeArgs,
                     '--ai-mode',
                     _aiModeFlagValue(_aiChannelMode),
                   ),
@@ -2443,7 +2493,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                   _effectiveAccelSensitivityMvPerG().toString(),
                 )
               : _upsertBridgeFlag(
-                  _bridgeArguments,
+                  bridgeArgs,
                   '--ai-mode',
                   _aiModeFlagValue(_aiChannelMode),
                 ),
@@ -2476,26 +2526,26 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         _trimLogs();
       });
       _showActionMessage('Kết nối bridge thất bại.');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isConnectionBusy = false;
+        });
+      }
     }
   }
 
   Future<void> _disconnectConnection({
     String reason = 'thao tác người dùng',
   }) async {
-    if (!_useBridge) {
-      setState(() {
-        _isConnected = false;
-        _actualSampleRateHz = null;
-        _actualSamplesPerRead = null;
-        _acquisitionService.setMockConnected(false);
-        _eventLogs.insert(
-          0,
-          '[${DateTime.now().toLocal()}] Đã ngắt kết nối demo ($reason)',
-        );
-        _trimLogs();
-      });
-      _showActionMessage('Đã ngắt kết nối demo. Lý do: $reason');
+    if (_isConnectionBusy) {
       return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _isConnectionBusy = true;
+      });
     }
 
     if (!_acquisitionService.isBridgeRunning) {
@@ -2513,27 +2563,44 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         _trimLogs();
       });
       _showActionMessage('Bridge đã ngắt trước đó.');
+      if (mounted) {
+        setState(() {
+          _isConnectionBusy = false;
+        });
+      }
       return;
     }
 
-    await _acquisitionService.stopBridge();
-    if (!mounted) {
-      return;
+    try {
+      await _acquisitionService.stopBridge();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isConnected = false;
+        _actualSampleRateHz = null;
+        _actualSamplesPerRead = null;
+        _eventLogs.insert(
+          0,
+          '[${DateTime.now().toLocal()}] Đã ngắt kết nối bridge ($reason)',
+        );
+        _trimLogs();
+      });
+      _showActionMessage('Đã ngắt kết nối bridge. Lý do: $reason');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isConnectionBusy = false;
+        });
+      }
     }
-    setState(() {
-      _isConnected = false;
-      _actualSampleRateHz = null;
-      _actualSamplesPerRead = null;
-      _eventLogs.insert(
-        0,
-        '[${DateTime.now().toLocal()}] Đã ngắt kết nối bridge ($reason)',
-      );
-      _trimLogs();
-    });
-    _showActionMessage('Đã ngắt kết nối bridge. Lý do: $reason');
   }
 
   Future<void> _toggleConnection() async {
+    if (_isConnectionBusy) {
+      return;
+    }
+
     if (_isConnected) {
       final bool shouldDisconnect = await _confirmDisconnectConnection();
       if (!shouldDisconnect) {
@@ -2556,54 +2623,23 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         .toList();
   }
 
-  Future<void> _toggleDataSource(bool enabled) async {
-    if (enabled == _useBridge) {
-      return;
-    }
-
-    if (!enabled && _acquisitionService.isBridgeRunning) {
-      await _disconnectConnection(reason: 'chuyển sang nguồn demo');
-    }
-
-    if (!mounted) {
-      return;
-    }
-
-    if (!enabled) {
-      _acquisitionService.setMockConnected(true);
-    }
-
-    _acquisitionService.setSource(
-      enabled ? AcquisitionSource.bridge : AcquisitionSource.mock,
-    );
-
-    setState(() {
-      _useBridge = enabled;
-      _isConnected = enabled ? _acquisitionService.isBridgeRunning : true;
-      _eventLogs.insert(
-        0,
-        '[${DateTime.now().toLocal()}] Nguồn dữ liệu: ${enabled ? 'NI-DAQmx bridge (đa kênh)' : 'Demo'}',
-      );
-    });
-    unawaited(_saveSettings());
-
-    if (enabled) {
-      await _connectConnection(trigger: 'chuyển sang nguồn bridge');
-    }
-  }
-
   void _onAcquisitionSample(AcquisitionSample sample) {
     if (!_isRunning || !mounted || _isReplayMode) {
       return;
     }
 
-    setState(() {
+    final DateTime now = DateTime.now();
+    final bool shouldRebuildUi =
+        _selectedScreenIndex == 2 ||
+        now.difference(_lastUiSampleFrameAt) >= _uiMinFrameInterval;
+
+    void applySample() {
       final DaqFftFrame? fftFrame = sample.fftFrame;
       if (fftFrame != null) {
         _bridgeFftSampleRateHz = fftFrame.sampleRateHz;
         _bridgeFftBinCount = fftFrame.binCount;
         _bridgeFftSamplesRead = fftFrame.samplesRead;
-        _bridgeFftCapturedAt = DateTime.now();
+        _bridgeFftCapturedAt = now;
         for (
           int ch = 0;
           ch < fftFrame.channelCount && ch < _channels.length;
@@ -2617,7 +2653,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       if (waveFrame != null) {
         _bridgeWaveSampleRateHz = waveFrame.sampleRateHz;
         _bridgeWaveDecimStep = waveFrame.decimStep;
-        _bridgeWaveCapturedAt = DateTime.now();
+        _bridgeWaveCapturedAt = now;
         for (
           int ch = 0;
           ch < waveFrame.channelCount && ch < _channels.length;
@@ -2644,11 +2680,20 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
 
       _appendDataLog(sample);
 
-      _isConnected = _useBridge
-          ? _acquisitionService.isBridgeRunning
-          : _acquisitionService.isMockConnected;
+      _isConnected = _acquisitionService.isBridgeRunning;
       _trimLogs();
-    });
+
+      if (shouldRebuildUi) {
+        _lastUiSampleFrameAt = now;
+      }
+    }
+
+    if (shouldRebuildUi) {
+      setState(applySample);
+      return;
+    }
+
+    applySample();
   }
 
   void _appendChannelValue(String channel, double value) {
@@ -2980,13 +3025,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         height: 1.2,
       ),
     );
-    final ButtonStyle sourceButtonStyle = _useBridge
-        ? topActionButtonStyle
-        : topActionButtonStyle.copyWith(
-            backgroundColor: const WidgetStatePropertyAll(Color(0xFFC0392B)),
-            foregroundColor: const WidgetStatePropertyAll(Colors.white),
-          );
-
     return Scaffold(
       appBar: AppBar(
         title: Text(screenTitle, maxLines: 1, overflow: TextOverflow.ellipsis),
@@ -3014,7 +3052,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                 const SizedBox(width: 8),
                 FilledButton.tonalIcon(
                   style: topActionButtonStyle,
-                  onPressed: _toggleRun,
+                  onPressed: _isConnectionBusy ? null : _toggleRun,
                   icon: Icon(_isRunning ? Icons.pause : Icons.play_arrow),
                   label: Text(
                     _isRunning ? 'Đang chạy' : 'Tạm dừng',
@@ -3023,27 +3061,21 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                 ),
                 const SizedBox(width: 8),
                 FilledButton.tonalIcon(
-                  style: sourceButtonStyle,
-                  onPressed: () {
-                    unawaited(_toggleDataSource(!_useBridge));
-                  },
-                  icon: const Icon(Icons.swap_horiz),
-                  label: Text(
-                    _useBridge ? 'Nguồn bridge' : 'Nguồn demo',
-                    softWrap: false,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                FilledButton.tonalIcon(
                   style: topActionButtonStyle,
-                  onPressed: _toggleConnection,
-                  icon: Icon(_isConnected ? Icons.link : Icons.link_off),
+                  onPressed: _isConnectionBusy ? null : _toggleConnection,
+                  icon: _isConnectionBusy
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Icon(_isConnected ? Icons.link : Icons.link_off),
                   label: Text(
-                    _useBridge
-                        ? (_isConnected
+                    _isConnectionBusy
+                        ? 'Đang xử lý...'
+                        : (_isConnected
                               ? 'Bridge đã kết nối'
-                              : 'Bridge đã ngắt')
-                        : (_isConnected ? 'Demo đã kết nối' : 'Demo đã ngắt'),
+                              : 'Bridge đã ngắt'),
                     softWrap: false,
                   ),
                 ),
@@ -3513,6 +3545,8 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   static const double _fftDisplayMaxHz = 5000.0;
   static const double _fftDisplayMinX = 1.0;
   static const double _fftDisplayMaxX = 3.7;
+  static const double _fftHighlightMinHz = 200.0;
+  static const double _fftHighlightMaxHz = 700.0;
 
   double _fftAxisXForFrequency(double frequencyHz) {
     final double clampedFrequency = frequencyHz.clamp(
@@ -3526,41 +3560,13 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     return _fftDisplayMinX + normalized * (_fftDisplayMaxX - _fftDisplayMinX);
   }
 
-  double _fftFrequencyForAxisX(double axisX) {
-    final double normalized =
-        ((axisX - _fftDisplayMinX) / (_fftDisplayMaxX - _fftDisplayMinX)).clamp(
-          0.0,
-          1.0,
-        );
-    final double minLog = log(_fftDisplayMinHz);
-    final double maxLog = log(_fftDisplayMaxHz);
-    return exp(minLog + normalized * (maxLog - minLog));
-  }
-
-  bool _isCloseTo(double value, double target, [double epsilon = 0.05]) {
-    return (value - target).abs() <= epsilon;
-  }
-
-  String _fftAxisLabelForValue(double value) {
-    if (_isCloseTo(value, _fftAxisXForFrequency(10))) return '10';
-    if (_isCloseTo(value, _fftAxisXForFrequency(100))) return '100';
-    if (_isCloseTo(value, _fftAxisXForFrequency(1000))) return '1000';
-    if (_isCloseTo(value, _fftAxisXForFrequency(5000))) return '5000';
-    return '';
-  }
-
-  List<FlSpot> _buildFftPlotSpots(List<double> freqs, List<double> mags) {
-    final List<FlSpot> spots = <FlSpot>[];
-    final int count = min(freqs.length, mags.length);
-    for (int i = 0; i < count; i++) {
-      final double frequencyHz = freqs[i];
-      if (frequencyHz < _fftDisplayMinHz) {
-        continue;
-      }
-      final double axisX = _fftAxisXForFrequency(frequencyHz);
-      spots.add(FlSpot(axisX, mags[i]));
-    }
-    return spots;
+  List<({String label, double x})> _buildFftAxisTicks() {
+    return <({String label, double x})>[
+      (label: '10', x: _fftAxisXForFrequency(10)),
+      (label: '100', x: _fftAxisXForFrequency(100)),
+      (label: '1000', x: _fftAxisXForFrequency(1000)),
+      (label: '5000', x: _fftAxisXForFrequency(5000)),
+    ];
   }
 
   Widget _buildFftPanel({bool compact = false}) {
@@ -3575,73 +3581,107 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         ? null
         : _extractReplayFftPayload(replaySample);
     final bool hasReplayFftPayload =
-        replayFftPayload != null &&
-        replayFftPayload.channelMags.containsKey(_fftChannel);
+        replayFftPayload != null && replayFftPayload.channelMags.isNotEmpty;
 
-    // ── Prefer real FFT from bridge; fall back to Dart-computed FFT (mock) ──
+    // ── Prefer real FFT from bridge; fall back to Dart-computed FFT ──
     // In replay mode, always derive FFT from replay history so playback affects FFT panel.
     final bool hasFrameFft =
-        !_isReplayMode &&
-        _bridgeFftBinCount > 1 &&
-        _bridgeFftMags.containsKey(_fftChannel);
+        !_isReplayMode && _bridgeFftBinCount > 1 && _bridgeFftMags.isNotEmpty;
 
-    List<double> freqs;
-    List<double> mags;
-    double srHz;
-    int samplesUsed;
+    final List<({String channel, List<double> freqs, List<double> mags})>
+    fftSeries = <({String channel, List<double> freqs, List<double> mags})>[];
+    double srHz = 0;
+    int samplesUsed = 0;
     String sourceLabel;
 
     if (hasReplayFftPayload) {
-      final List<double> rawMags = replayFftPayload.channelMags[_fftChannel]!;
-      mags = rawMags.length > 1 ? rawMags.sublist(1) : rawMags;
       srHz = replayFftPayload.sampleRateHz.toDouble();
       samplesUsed = replayFftPayload.samplesRead;
       final int fftN = DaqFftFrame.nextPow2(
         max(1, replayFftPayload.samplesRead),
       );
-      freqs = List<double>.generate(
-        mags.length,
-        (int k) => (k + 1) * srHz / fftN,
-      );
+      for (final String channel in _channels) {
+        final List<double>? rawMags = replayFftPayload.channelMags[channel];
+        if (rawMags == null || rawMags.isEmpty) {
+          continue;
+        }
+        final List<double> mags = rawMags.length > 1
+            ? rawMags.sublist(1)
+            : rawMags;
+        if (mags.isEmpty) {
+          continue;
+        }
+        final List<double> freqs = List<double>.generate(
+          mags.length,
+          (int k) => (k + 1) * srHz / fftN,
+        );
+        fftSeries.add((channel: channel, freqs: freqs, mags: mags));
+      }
       sourceLabel = 'FFT replay (payload từ log)';
     } else if (hasFrameFft) {
-      final List<double> rawMags = _bridgeFftMags[_fftChannel]!;
-      // Skip bin 0 (DC) — same as Dart path
-      mags = rawMags.length > 1 ? rawMags.sublist(1) : rawMags;
       srHz = _bridgeFftSampleRateHz.toDouble();
       samplesUsed = _bridgeFftSamplesRead;
       final int fftN = DaqFftFrame.nextPow2(_bridgeFftSamplesRead);
-      freqs = List<double>.generate(
-        mags.length,
-        (int k) => (k + 1) * srHz / fftN,
-      );
-      sourceLabel = _useBridge
-          ? 'FFT bridge (phần cứng)'
-          : 'FFT demo (mô phỏng block 10kHz)';
+      for (final String channel in _channels) {
+        final List<double>? rawMags = _bridgeFftMags[channel];
+        if (rawMags == null || rawMags.isEmpty) {
+          continue;
+        }
+        // Skip bin 0 (DC) — same as Dart path.
+        final List<double> mags = rawMags.length > 1
+            ? rawMags.sublist(1)
+            : rawMags;
+        if (mags.isEmpty) {
+          continue;
+        }
+        final List<double> freqs = List<double>.generate(
+          mags.length,
+          (int k) => (k + 1) * srHz / fftN,
+        );
+        fftSeries.add((channel: channel, freqs: freqs, mags: mags));
+      }
+      sourceLabel = 'FFT bridge (phần cứng)';
     } else {
-      final ({
-        List<double> freqs,
-        List<double> mags,
-        double sampleRateHz,
-        int samplesUsed,
-      })
-      r = _computeChannelFft(_fftChannel, 1024);
-      freqs = r.freqs;
-      mags = r.mags;
-      srHz = r.sampleRateHz;
-      samplesUsed = r.samplesUsed;
+      for (final String channel in _channels) {
+        final ({
+          List<double> freqs,
+          List<double> mags,
+          double sampleRateHz,
+          int samplesUsed,
+        })
+        r = _computeChannelFft(channel, 1024);
+        if (r.mags.isEmpty || r.freqs.isEmpty) {
+          continue;
+        }
+        if (srHz <= 0 && r.sampleRateHz > 0) {
+          srHz = r.sampleRateHz;
+          samplesUsed = r.samplesUsed;
+        }
+        fftSeries.add((channel: channel, freqs: r.freqs, mags: r.mags));
+      }
       sourceLabel = _isReplayMode
           ? 'Dart FFT (replay từ log)'
-          : 'Dart FFT (demo / vỏ bao RMS)';
+          : 'Dart FFT (ước tính từ RMS, chờ khung FFT từ bridge)';
     }
 
-    final double peakMag = mags.isEmpty ? 0.0 : mags.reduce(max);
-    final double minMag = mags.isEmpty ? 0.0 : mags.reduce(min);
+    final List<double> allMags = fftSeries
+        .expand(
+          (({String channel, List<double> freqs, List<double> mags}) s) =>
+              s.mags,
+        )
+        .toList(growable: false);
+    final double peakMag = allMags.isEmpty ? 0.0 : allMags.reduce(max);
+    final double minMag = allMags.isEmpty ? 0.0 : allMags.reduce(min);
     if (peakMag * 1.2 > _fftMaxY) {
       _fftMaxY = peakMag * 1.2;
     }
     final double safeMaxY = _fftMaxY;
-    final List<FlSpot> fftSpots = _buildFftPlotSpots(freqs, mags);
+    final List<FftBarDatum> fftBars = buildFftBarData(
+      fftSeries: fftSeries,
+      colorForChannel: _channelColor,
+      axisXForFrequency: _fftAxisXForFrequency,
+    );
+    final List<({String label, double x})> fftTicks = _buildFftAxisTicks();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -3650,35 +3690,53 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
           _buildSamplingInfoCard(),
           const SizedBox(height: 8),
         ],
-        // Channel selector
-        Row(
-          children: <Widget>[
-            const Text(
-              'Kênh FFT:',
-              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: _channels.map((String ch) {
-                    final bool selected = ch == _fftChannel;
-                    return Padding(
-                      padding: const EdgeInsets.only(right: 6),
-                      child: ChoiceChip(
-                        label: Text(ch, style: const TextStyle(fontSize: 11)),
-                        selected: selected,
-                        onSelected: (_) {
-                          setState(() => _fftChannel = ch);
-                        },
+        Text(
+          'Kênh FFT: ${fftSeries.length}/${_channels.length} (bar chart)',
+          style: const TextStyle(
+            fontWeight: FontWeight.w600,
+            fontSize: 12,
+            color: Color(0xFF4B5B6B),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          children: _channels
+              .map((String channel) {
+                final bool visible = fftSeries.any(
+                  (
+                    ({String channel, List<double> freqs, List<double> mags}) s,
+                  ) => s.channel == channel,
+                );
+                final Color color = _channelColor(channel);
+                return Opacity(
+                  opacity: visible ? 1.0 : 0.35,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Container(
+                        width: 9,
+                        height: 9,
+                        decoration: BoxDecoration(
+                          color: color,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
                       ),
-                    );
-                  }).toList(),
-                ),
-              ),
-            ),
-          ],
+                      const SizedBox(width: 4),
+                      Text(
+                        channel,
+                        style: const TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF4A5A6A),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              })
+              .toList(growable: false),
         ),
         const SizedBox(height: 8),
         if (srHz > 0)
@@ -3701,7 +3759,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
               runSpacing: 4,
               children: <Widget>[
                 Text(
-                  'THÔNG TIN FFT ${hasReplayFftPayload ? 'replay-payload' : (hasFrameFft ? (_useBridge ? 'bridge' : 'khung-demo') : 'demo-du-phong')}',
+                  'THÔNG TIN FFT ${hasReplayFftPayload ? 'replay-payload' : (hasFrameFft ? 'bridge' : 'du-phong')}',
                   style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
@@ -3716,7 +3774,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                   ),
                 ),
                 Text(
-                  'Số bin=${mags.length}',
+                  'Số cột=${fftBars.length} | Số kênh=${fftSeries.length}',
                   style: const TextStyle(
                     fontSize: 11,
                     color: Color(0xFF4B5B6B),
@@ -3749,183 +3807,27 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         ],
         const SizedBox(height: 8),
         Expanded(
-          child: freqs.isEmpty
+          child: fftBars.isEmpty
               ? const Center(
                   child: Text(
-                    'Chưa đủ dữ liệu để tính FFT (cần ≥ 8 mẫu)',
+                    'Chưa đủ dữ liệu FFT để hiển thị (cần dữ liệu cho từng kênh)',
                     style: TextStyle(fontSize: 13, color: Color(0xFF5E6A79)),
                   ),
                 )
-              : LineChart(
-                  duration: Duration.zero,
-                  curve: Curves.linear,
-                  LineChartData(
-                    minX: _fftDisplayMinX,
-                    maxX: _fftDisplayMaxX,
-                    minY: 0,
-                    maxY: safeMaxY,
-                    clipData: const FlClipData.none(),
-                    lineTouchData: LineTouchData(
-                      enabled: true,
-                      touchTooltipData: LineTouchTooltipData(
-                        getTooltipItems: (List<LineBarSpot> spots) {
-                          return spots.map((LineBarSpot s) {
-                            final double frequencyHz = _fftFrequencyForAxisX(
-                              s.x,
-                            );
-                            return LineTooltipItem(
-                              '${frequencyHz.toStringAsFixed(1)} Hz\n${s.y.toStringAsFixed(4)}',
-                              const TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            );
-                          }).toList();
-                        },
-                      ),
+              : FftBarChart(
+                  bars: fftBars,
+                  ticks: fftTicks,
+                  minX: _fftDisplayMinX,
+                  maxX: _fftDisplayMaxX,
+                  minY: 0,
+                  maxY: safeMaxY,
+                  highlightBands: <({double fromX, double toX, Color color})>[
+                    (
+                      fromX: _fftAxisXForFrequency(_fftHighlightMinHz),
+                      toX: _fftAxisXForFrequency(_fftHighlightMaxHz),
+                      color: const Color(0x22FFF2B2),
                     ),
-                    gridData: FlGridData(
-                      show: true,
-                      drawVerticalLine: false,
-                      horizontalInterval: safeMaxY > 0.001
-                          ? safeMaxY / 4
-                          : 0.01,
-                      getDrawingHorizontalLine: (_) => const FlLine(
-                        color: Color(0xFFCDD8CC),
-                        strokeWidth: 0.7,
-                        dashArray: <int>[3, 3],
-                      ),
-                    ),
-                    titlesData: FlTitlesData(
-                      leftTitles: AxisTitles(
-                        axisNameWidget: const Text(
-                          'Biên độ',
-                          style: TextStyle(fontSize: 10),
-                        ),
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          reservedSize: 44,
-                          getTitlesWidget: (double value, TitleMeta meta) {
-                            return Text(
-                              value.toStringAsFixed(3),
-                              style: const TextStyle(
-                                fontSize: 9,
-                                color: Color(0xFF4A5A6A),
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                      rightTitles: const AxisTitles(
-                        sideTitles: SideTitles(showTitles: false),
-                      ),
-                      topTitles: const AxisTitles(
-                        sideTitles: SideTitles(showTitles: false),
-                      ),
-                      bottomTitles: AxisTitles(
-                        axisNameWidget: const Text(
-                          'Tần số (Hz)',
-                          style: TextStyle(fontSize: 10),
-                        ),
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          reservedSize: 22,
-                          interval: 0.1,
-                          getTitlesWidget: (double value, TitleMeta meta) {
-                            final String label = _fftAxisLabelForValue(value);
-                            if (label.isEmpty) {
-                              return const SizedBox.shrink();
-                            }
-                            return SideTitleWidget(
-                              axisSide: meta.axisSide,
-                              child: Text(
-                                label,
-                                style: const TextStyle(
-                                  fontSize: 9,
-                                  fontWeight: FontWeight.w600,
-                                  color: Color(0xFF3A4A5A),
-                                ),
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-                    ),
-                    extraLinesData: ExtraLinesData(
-                      verticalLines: <VerticalLine>[
-                        // Minor log-scale grid lines
-                        ...<double>[
-                          20,
-                          30,
-                          40,
-                          50,
-                          60,
-                          70,
-                          80,
-                          90,
-                          200,
-                          300,
-                          400,
-                          500,
-                          600,
-                          700,
-                          800,
-                          900,
-                          2000,
-                          3000,
-                          4000,
-                        ].map(
-                          (double f) => VerticalLine(
-                            x: _fftAxisXForFrequency(f),
-                            color: const Color(0xFFCDD8C8),
-                            strokeWidth: 0.4,
-                            dashArray: <int>[2, 4],
-                          ),
-                        ),
-                        // Major decade lines (10, 100, 1000, 5000 Hz)
-                        ...<double>[10, 100, 1000, 5000].map(
-                          (double f) => VerticalLine(
-                            x: _fftAxisXForFrequency(f),
-                            color: const Color(0xFF8EA8B8),
-                            strokeWidth: 1.0,
-                          ),
-                        ),
-                      ],
-                    ),
-                    rangeAnnotations: RangeAnnotations(
-                      verticalRangeAnnotations: <VerticalRangeAnnotation>[
-                        VerticalRangeAnnotation(
-                          x1: _fftAxisXForFrequency(200),
-                          x2: _fftAxisXForFrequency(700),
-                          color: const Color(0xFFF5F9EE),
-                        ),
-                      ],
-                    ),
-                    borderData: FlBorderData(
-                      show: true,
-                      border: const Border(
-                        left: BorderSide(color: Color(0xFF8EA8B8), width: 1),
-                        bottom: BorderSide(color: Color(0xFF8EA8B8), width: 1),
-                        right: BorderSide(color: Color(0xFFCDD5D8), width: 0.5),
-                        top: BorderSide(color: Color(0xFFCDD5D8), width: 0.5),
-                      ),
-                    ),
-                    lineBarsData: <LineChartBarData>[
-                      LineChartBarData(
-                        spots: fftSpots,
-                        isCurved: false,
-                        color: _channelColor(_fftChannel),
-                        barWidth: 1.5,
-                        dotData: const FlDotData(show: false),
-                        belowBarData: BarAreaData(
-                          show: true,
-                          color: _channelColor(
-                            _fftChannel,
-                          ).withValues(alpha: 0.15),
-                        ),
-                      ),
-                    ],
-                  ),
+                  ],
                 ),
         ),
       ],
@@ -3943,35 +3845,70 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     replayWavePayload = replaySample == null
         ? null
         : _extractReplayWavePayload(replaySample);
-    final bool hasReplayWavePayload =
-        replayWavePayload != null &&
-        replayWavePayload.channelSamples.containsKey(_waveChannel);
+    final Map<String, List<double>> waveSeriesByChannel =
+        <String, List<double>>{};
 
-    final List<double>? bridgeSamples = _bridgeWaveSamples[_waveChannel];
-    // In replay mode, ignore live bridge waveform and use replay timeline data.
-    final bool hasFrameData =
-        !_isReplayMode &&
-        bridgeSamples != null &&
-        bridgeSamples.isNotEmpty &&
-        _bridgeWaveSampleRateHz > 0;
-
-    final List<double> mockSamples = _activeCombinedHistory(
-      _waveChannel,
-    ).map((FlSpot spot) => spot.y).toList();
-    if (mockSamples.length > 240) {
-      mockSamples.removeRange(0, mockSamples.length - 240);
+    bool hasReplayWavePayload = false;
+    if (replayWavePayload != null) {
+      for (final String ch in _channels) {
+        final List<double>? samples = replayWavePayload.channelSamples[ch];
+        if (samples != null && samples.length > 1) {
+          waveSeriesByChannel[ch] = samples;
+        }
+      }
+      hasReplayWavePayload = waveSeriesByChannel.isNotEmpty;
     }
-    final bool hasMockData =
-        (_isReplayMode || !_useBridge) && mockSamples.length > 1;
 
-    final bool hasData = hasReplayWavePayload || hasFrameData || hasMockData;
-    final List<double> activeSamples = hasReplayWavePayload
-        ? replayWavePayload.channelSamples[_waveChannel]!
-        : (hasFrameData ? bridgeSamples : mockSamples);
+    // In replay mode, ignore live bridge waveform and use replay timeline data.
+    bool hasFrameData = false;
+    if (!hasReplayWavePayload &&
+        !_isReplayMode &&
+        _bridgeWaveSampleRateHz > 0) {
+      for (final String ch in _channels) {
+        final List<double>? samples = _bridgeWaveSamples[ch];
+        if (samples != null && samples.length > 1) {
+          waveSeriesByChannel[ch] = samples;
+        }
+      }
+      hasFrameData = waveSeriesByChannel.isNotEmpty;
+    }
+
+    if (!hasReplayWavePayload && !hasFrameData) {
+      for (final String ch in _channels) {
+        final List<double> historyFallbackSamples = _activeCombinedHistory(
+          ch,
+        ).map((FlSpot spot) => spot.y).toList();
+        if (historyFallbackSamples.length > 240) {
+          historyFallbackSamples.removeRange(
+            0,
+            historyFallbackSamples.length - 240,
+          );
+        }
+        if (historyFallbackSamples.length > 1) {
+          waveSeriesByChannel[ch] = historyFallbackSamples;
+        }
+      }
+    }
+
+    final bool hasData = waveSeriesByChannel.isNotEmpty;
+    final ({
+      int sampleRateHz,
+      int decimStep,
+      String unit,
+      Map<String, List<double>> channelSamples,
+    })?
+    activeReplayWavePayload = hasReplayWavePayload ? replayWavePayload : null;
+    final String selectedWaveChannel =
+        waveSeriesByChannel.containsKey(_waveChannel)
+        ? _waveChannel
+        : (hasData ? waveSeriesByChannel.keys.first : _waveChannel);
+    final List<double> activeSamples =
+        waveSeriesByChannel[selectedWaveChannel] ?? const <double>[];
+    final int plottedChannelCount = waveSeriesByChannel.length;
     final int outCount = activeSamples.length;
     final double timeStepMs = hasReplayWavePayload
-        ? (replayWavePayload.decimStep /
-              replayWavePayload.sampleRateHz *
+        ? (activeReplayWavePayload!.decimStep /
+              activeReplayWavePayload.sampleRateHz *
               1000.0)
         : (hasFrameData
               ? (_bridgeWaveDecimStep / _bridgeWaveSampleRateHz * 1000.0)
@@ -3982,14 +3919,16 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
     final double clampedWindowMs = _clampWaveformTimeWindowMs(
       _waveformTimeWindowMs,
     );
-    final bool autoExpandWindowForMock =
+    final bool autoExpandWindowForFallback =
         !(hasReplayWavePayload || hasFrameData);
     final double displayTimeWindowMs = _clampWaveformTimeWindowMs(
-      autoExpandWindowForMock ? max(blockMs, clampedWindowMs) : clampedWindowMs,
+      autoExpandWindowForFallback
+          ? max(blockMs, clampedWindowMs)
+          : clampedWindowMs,
     );
     final bool waveInVoltage = hasReplayWavePayload
-        ? replayWavePayload.unit.toUpperCase() == 'V'
-        : (_useBridge && hasFrameData);
+        ? activeReplayWavePayload!.unit.toUpperCase() == 'V'
+        : hasFrameData;
     final double minY = waveInVoltage ? _voltageMin : _chartMinG;
     final double maxY = waveInVoltage ? _voltageMax : _chartMaxG;
     final String yAxisLabel = waveInVoltage ? 'Điện áp (V)' : 'Biên độ (g)';
@@ -4111,10 +4050,11 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         const SizedBox(height: 8),
         if (hasData)
           Text(
-            'Dạng sóng (${hasReplayWavePayload ? 'replay-payload' : (hasFrameData ? 'bridge' : 'demo')})  |  N=$outCount  |  Fs: ${effectiveFsHz.toStringAsFixed(1)} Hz'
+            'Dạng sóng (${hasReplayWavePayload ? 'replay-payload' : (hasFrameData ? 'bridge' : 'du-phong')})  |  N=$outCount  |  Fs: ${effectiveFsHz.toStringAsFixed(1)} Hz'
+            '  |  Kênh: $plottedChannelCount/${_channels.length}'
             '  |  Khối: ${blockMs.toStringAsFixed(1)} ms'
             '  |  Cửa sổ: ${displayTimeWindowMs.toStringAsFixed(1)} ms'
-            '${hasReplayWavePayload ? '  |  Giảm mẫu: ×${replayWavePayload.decimStep}' : (hasFrameData ? '  |  Giảm mẫu: ×$_bridgeWaveDecimStep' : '')}',
+            '${hasReplayWavePayload ? '  |  Giảm mẫu: ×${activeReplayWavePayload!.decimStep}' : (hasFrameData ? '  |  Giảm mẫu: ×$_bridgeWaveDecimStep' : '')}',
             style: const TextStyle(fontSize: 11, color: Color(0xFF5E6A79)),
           ),
         if (!compact) ...<Widget>[
@@ -4132,7 +4072,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
               runSpacing: 4,
               children: <Widget>[
                 Text(
-                  'THÔNG TIN SÓNG ${hasReplayWavePayload ? 'replay-payload' : (waveInVoltage ? 'bridge' : 'demo')}',
+                  'THÔNG TIN SÓNG ${hasReplayWavePayload ? 'replay-payload' : (waveInVoltage ? 'bridge' : 'du-phong')}',
                   style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w700,
@@ -4167,6 +4107,13 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                     color: Color(0xFF4B5B6B),
                   ),
                 ),
+                Text(
+                  'Kênh chọn=$selectedWaveChannel',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF4B5B6B),
+                  ),
+                ),
               ],
             ),
           ),
@@ -4176,7 +4123,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
           child: !hasData
               ? const Center(
                   child: Text(
-                    'Chưa đủ dữ liệu sóng (demo cần >= 2 mẫu)',
+                    'Chưa đủ dữ liệu sóng (cần >= 2 mẫu)',
                     style: TextStyle(fontSize: 13, color: Color(0xFF5E6A79)),
                   ),
                 )
@@ -4189,22 +4136,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                     minY: minY,
                     maxY: maxY,
                     clipData: FlClipData.all(),
-                    lineTouchData: LineTouchData(
-                      enabled: true,
-                      touchTooltipData: LineTouchTooltipData(
-                        getTooltipItems: (List<LineBarSpot> spots) {
-                          return spots.map((LineBarSpot s) {
-                            return LineTooltipItem(
-                              '${s.x.toStringAsFixed(3)} ms\n${s.y.toStringAsFixed(4)} $valueUnit',
-                              const TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            );
-                          }).toList();
-                        },
-                      ),
-                    ),
+                    lineTouchData: const LineTouchData(enabled: false),
                     gridData: FlGridData(
                       show: true,
                       drawVerticalLine: true,
@@ -4258,18 +4190,21 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                       ),
                     ),
                     borderData: FlBorderData(show: false),
-                    lineBarsData: <LineChartBarData>[
-                      LineChartBarData(
+                    lineBarsData: waveSeriesByChannel.entries.map((
+                      MapEntry<String, List<double>> entry,
+                    ) {
+                      final List<double> channelSamples = entry.value;
+                      return LineChartBarData(
                         spots: List<FlSpot>.generate(
-                          outCount,
-                          (int i) => FlSpot(i * timeStepMs, activeSamples[i]),
+                          channelSamples.length,
+                          (int i) => FlSpot(i * timeStepMs, channelSamples[i]),
                         ),
                         isCurved: false,
-                        color: _channelColor(_waveChannel),
-                        barWidth: 1.2,
+                        color: _channelColor(entry.key),
+                        barWidth: 1.1,
                         dotData: const FlDotData(show: false),
-                      ),
-                    ],
+                      );
+                    }).toList(),
                   ),
                 ),
         ),
@@ -4278,11 +4213,13 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   }
 
   Widget _buildCombinedChartScreen(BoxConstraints constraints) {
+    final bool showAnyPanel =
+        _showCombinedPanel || _showFftPanel || _showWavePanel;
+    final bool showCombinedContent = _showCombinedPanel && showAnyPanel;
     final double chartRange = _chartMaxG - _chartMinG;
-    final List<LineChartBarData> lineBars = <LineChartBarData>[];
-    final List<String> visibleChannels = _channels
-        .where(_isCombinedChannelVisible)
-        .toList();
+    final List<String> visibleChannels = showCombinedContent
+        ? _channels.where(_isCombinedChannelVisible).toList()
+        : const <String>[];
     final double frameNowMs = _isReplayMode && _replayFrameIndex >= 0
         ? _replaySamples[_replayFrameIndex].timestamp.millisecondsSinceEpoch
               .toDouble()
@@ -4293,29 +4230,32 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
         ? frameNowSec - fixedWindowSeconds
         : frameNowSec;
     double maxVisibleX = frameNowSec;
+    final List<LineChartBarData> lineBars = <LineChartBarData>[];
 
-    for (final String channel in visibleChannels) {
-      final List<FlSpot> safeSpots = _visibleSpotsForCombinedChart(
-        channel,
-        _selectedCombinedWindowMinutes,
-        frameNowMs,
-      );
-      if (fixedWindowSeconds == null) {
-        minVisibleX = min(minVisibleX, safeSpots.first.x);
-        maxVisibleX = max(maxVisibleX, safeSpots.last.x);
+    if (showCombinedContent) {
+      for (final String channel in visibleChannels) {
+        final List<FlSpot> safeSpots = _visibleSpotsForCombinedChart(
+          channel,
+          _selectedCombinedWindowMinutes,
+          frameNowMs,
+        );
+        if (fixedWindowSeconds == null) {
+          minVisibleX = min(minVisibleX, safeSpots.first.x);
+          maxVisibleX = max(maxVisibleX, safeSpots.last.x);
+        }
+
+        lineBars.add(
+          LineChartBarData(
+            spots: safeSpots,
+            isCurved: false,
+            preventCurveOverShooting: true,
+            color: _channelColor(channel),
+            barWidth: 2,
+            dotData: const FlDotData(show: false),
+            belowBarData: BarAreaData(show: false),
+          ),
+        );
       }
-
-      lineBars.add(
-        LineChartBarData(
-          spots: safeSpots,
-          isCurved: false,
-          preventCurveOverShooting: true,
-          color: _channelColor(channel),
-          barWidth: 2,
-          dotData: const FlDotData(show: false),
-          belowBarData: BarAreaData(show: false),
-        ),
-      );
     }
 
     final double visibleSpanSeconds = max(maxVisibleX - minVisibleX, 1);
@@ -4872,9 +4812,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                   ? Icons.movie_creation_outlined
                   : Icons.sensors,
               label: 'Nguồn',
-              value: _isReplayMode
-                  ? 'Replay log'
-                  : (_useBridge ? 'Bridge live' : 'Demo live'),
+              value: _isReplayMode ? 'Replay log' : 'Bridge live',
             ),
           ],
         ),
@@ -4915,6 +4853,33 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       ],
     );
 
+    final Widget combinedOverviewPanel = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        combinedHeaderPanel,
+        const SizedBox(height: 6),
+        Expanded(child: combinedTimePanel),
+      ],
+    );
+
+    final List<Widget> sidePanels = <Widget>[
+      if (_showFftPanel)
+        Expanded(
+          child: _panelShell(
+            title: 'FFT phổ tần',
+            child: _buildFftPanel(compact: true),
+          ),
+        ),
+      if (_showFftPanel && _showWavePanel) const SizedBox(height: 10),
+      if (_showWavePanel)
+        Expanded(
+          child: _panelShell(
+            title: 'Dạng sóng',
+            child: _buildWavePanel(compact: true),
+          ),
+        ),
+    ];
+
     return Padding(
       padding: const EdgeInsets.all(10),
       child: Card(
@@ -4929,62 +4894,42 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                 const SizedBox(height: 4),
               ],
               Expanded(
-                child: isWide
+                child: !showAnyPanel
+                    ? const Center(
+                        child: Text(
+                          'Đang tắt toàn bộ panel hiển thị. Bật lại trong tab Cài đặt.',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF5E6A79),
+                          ),
+                        ),
+                      )
+                    : isWide
                     ? Row(
                         children: <Widget>[
-                          Expanded(
-                            flex: 7,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: <Widget>[
-                                combinedHeaderPanel,
-                                const SizedBox(height: 6),
-                                Expanded(child: combinedTimePanel),
-                              ],
+                          if (_showCombinedPanel)
+                            Expanded(flex: 7, child: combinedOverviewPanel),
+                          if (_showCombinedPanel && sidePanels.isNotEmpty)
+                            const SizedBox(width: 10),
+                          if (sidePanels.isNotEmpty)
+                            Expanded(
+                              flex: 5,
+                              child: Column(children: sidePanels),
                             ),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            flex: 5,
-                            child: Column(
-                              children: <Widget>[
-                                Expanded(
-                                  child: _panelShell(
-                                    title: 'FFT phổ tần',
-                                    child: _buildFftPanel(compact: true),
-                                  ),
-                                ),
-                                const SizedBox(height: 10),
-                                Expanded(
-                                  child: _panelShell(
-                                    title: 'Dạng sóng',
-                                    child: _buildWavePanel(compact: true),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
                         ],
                       )
                     : Column(
                         children: <Widget>[
-                          Expanded(flex: 4, child: combinedTimePanel),
-                          const SizedBox(height: 10),
-                          Expanded(
-                            flex: 3,
-                            child: _panelShell(
-                              title: 'FFT phổ tần',
-                              child: _buildFftPanel(compact: true),
+                          if (_showCombinedPanel)
+                            Expanded(flex: 4, child: combinedOverviewPanel),
+                          if (_showCombinedPanel && sidePanels.isNotEmpty)
+                            const SizedBox(height: 10),
+                          if (sidePanels.isNotEmpty)
+                            Expanded(
+                              flex: 3,
+                              child: Column(children: sidePanels),
                             ),
-                          ),
-                          const SizedBox(height: 10),
-                          Expanded(
-                            flex: 3,
-                            child: _panelShell(
-                              title: 'Dạng sóng',
-                              child: _buildWavePanel(compact: true),
-                            ),
-                          ),
                         ],
                       ),
               ),
@@ -5388,6 +5333,83 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
             ),
             const SizedBox(height: 14),
             const Divider(height: 1),
+            const SizedBox(height: 12),
+            const Text(
+              'Hiển thị màn Kênh tổng hợp',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 6),
+            SwitchListTile.adaptive(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Kênh tổng hợp'),
+              value: _showCombinedPanel,
+              onChanged: (bool value) {
+                setState(() {
+                  _showCombinedPanel = value;
+                });
+                _scheduleSaveSettings();
+              },
+            ),
+            SwitchListTile.adaptive(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: const Text('FFT phổ tần'),
+              value: _showFftPanel,
+              onChanged: (bool value) {
+                setState(() {
+                  _showFftPanel = value;
+                });
+                _scheduleSaveSettings();
+              },
+            ),
+            SwitchListTile.adaptive(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Dạng sóng'),
+              value: _showWavePanel,
+              onChanged: (bool value) {
+                setState(() {
+                  _showWavePanel = value;
+                });
+                _scheduleSaveSettings();
+              },
+            ),
+            const SizedBox(height: 6),
+            DropdownButtonFormField<int>(
+              value: _uiRefreshFps,
+              decoration: const InputDecoration(
+                labelText: 'Tốc độ làm mới UI (FPS)',
+              ),
+              items: _uiRefreshFpsOptions
+                  .map(
+                    (int fps) => DropdownMenuItem<int>(
+                      value: fps,
+                      child: Text('$fps FPS'),
+                    ),
+                  )
+                  .toList(),
+              onChanged: (int? value) {
+                if (value == null) {
+                  return;
+                }
+                setState(() {
+                  _uiRefreshFps = value;
+                });
+                _scheduleSaveSettings();
+              },
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Chu kỳ vẽ tối thiểu: ${_uiMinFrameInterval.inMilliseconds} ms/frame',
+              style: const TextStyle(
+                fontSize: 12,
+                color: Color(0xFF5E6A79),
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 14),
+            const Divider(height: 1),
             const SizedBox(height: 14),
             Row(
               children: <Widget>[
@@ -5513,13 +5535,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       _trimLogs();
     });
 
-    _acquisitionService.setMockSamplingConfig(
-      sampleRateHz: _sampleRateHz,
-      samplesPerRead: _samplesPerRead,
-    );
-    if (!_useBridge) {
-      _startAcquisition();
-    }
+    _updateSampleIntervalEstimate();
     unawaited(_saveSettings());
   }
 
@@ -5579,6 +5595,10 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       _waveformTimeWindowMinMs = 20.0;
       _waveformTimeWindowMaxMs = 2000.0;
       _waveformTimeWindowMs = _clampWaveformTimeWindowMs(200.0);
+      _showCombinedPanel = true;
+      _showFftPanel = true;
+      _showWavePanel = true;
+      _uiRefreshFps = 30;
 
       _chartMinController.text = _chartMinG.toString();
       _chartMaxController.text = _chartMaxG.toString();
@@ -5632,13 +5652,12 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   }
 
   Widget _buildSamplingInfoCard({bool compact = false}) {
-    final String actualSamplingLabel = _useBridge
-        ? (_isConnected &&
-                  _actualSampleRateHz != null &&
-                  _actualSamplesPerRead != null
-              ? 'Thực tế: ${_actualSampleRateHz!} Hz | ${_actualSamplesPerRead!} mẫu/lần đọc'
-              : 'Thực tế: đang chờ dữ liệu bridge...')
-        : 'Thực tế: nguồn demo';
+    final String actualSamplingLabel =
+        _isConnected &&
+            _actualSampleRateHz != null &&
+            _actualSamplesPerRead != null
+        ? 'Thực tế: ${_actualSampleRateHz!} Hz | ${_actualSamplesPerRead!} mẫu/lần đọc'
+        : 'Thực tế: đang chờ dữ liệu bridge...';
 
     return Card(
       child: Padding(
@@ -5699,7 +5718,7 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
           style: presetButtonStyle,
           onPressed: () {
             _applyBridgePreset(
-              '--stream --rate 5000 --samples 500 --min -10 --max 10 --ai-mode voltage cDAQ9181-1E439C1Mod1/ai0:15',
+              '--stream --rate 10000 --samples 1000 --min -10 --max 10 --ai-mode voltage cDAQ9181-1E439C1Mod1/ai0:15',
               'On dinh 16 kenh',
             );
           },

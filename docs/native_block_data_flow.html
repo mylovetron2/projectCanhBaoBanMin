@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Native Data Flow - BLOCK_MULTI</title>
+  <title>Native Data Flow - BLOCK_BIN</title>
   <style>
     :root {
       --bg: #f4f7fb;
@@ -106,7 +106,7 @@
 <body>
   <main class="container">
     <section class="card">
-      <h1>Native Data Flow (BLOCK_MULTI)</h1>
+      <h1>Native Data Flow (BLOCK_BIN)</h1>
       <p>
         So do khoi luong du lieu Native theo file hien tai:
         <code>startBridge -> RunStreamRead -> Compute -> BLOCK emit</code>.
@@ -131,13 +131,13 @@ flowchart LR
     G --> I[Compute FFT per channel]
     G --> J[Decimate Wave step 5]
 
-    H --> K[Build BLOCK_MULTI string]
+    H --> K[Build BLK1 binary payload]
     I --> K
     J --> K
 
-    K --> L[EmitLine to EventChannel]
-    L --> M[Dart _parseLine]
-    M --> N[parse BLOCK_MULTI]
+    K --> L[EmitBinary to EventChannel]
+    L --> M[Dart _parseBinaryEvent]
+    M --> N[parse BLOCK_BIN]
     N --> O[DaqBlockFrame]
     O --> P[DataAcquisitionService onBridgeBlockFrame]
     P --> Q[AcquisitionSample with fft wave rms]
@@ -146,7 +146,7 @@ flowchart LR
     </section>
 
     <section class="card">
-      <h2>2) Payload BLOCK_MULTI hien tai</h2>
+      <h2>2) Payload BLOCK_BIN hien tai</h2>
       <table>
         <thead>
           <tr>
@@ -156,12 +156,12 @@ flowchart LR
             <th>Mo ta</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody>                                               
           <tr>
             <td>1</td>
             <td>Header</td>
-            <td>6 fields</td>
-            <td>BLOCK_MULTI, sampleRateHz, samplesRead, channelCount, binCount, decimStep</td>
+            <td>9 x u32</td>
+            <td>magic(BLK1), version, sampleRateHz, samplesRead, channelCount, binCount, decimStep, outCount, flags</td>
           </tr>
           <tr>
             <td>2</td>
@@ -185,7 +185,9 @@ flowchart LR
       </table>
 
       <div class="formula">
-Total fields = 6 + C + (C x B) + (C x O)
+Total floats = C + (C x B) + (C x O) + (co the co C x samplesRead neu co raw interleaved)
+
+Total bytes = 9 x 4 + (Total floats x 4)
 
 O = ceil(samplesRead / decimStep)
       </div>
@@ -195,9 +197,9 @@ O = ceil(samplesRead / decimStep)
     </section>
 
     <section class="card">
-      <h2>3) Vi sao chuoi dai gay nang</h2>
-      <p>Native phai format hang nghin so thanh text moi block, sau do Dart phai split va parse lai tung token.</p>
-      <p>CPU + cap phat bo nho tang, de thay giat khi resize/minimize.</p>
+      <h2>3) Vi sao van co the nang CPU</h2>
+      <p>Da bo buoc format chuoi lon, nhung van ton chi phi o FFT da kenh, cap phat bo nho payload, va repaint chart khi tan suat block cao.</p>
+      <p>Neu sampleRate/samplesPerRead qua lon, UI van co the giat khi resize/minimize do backlog event + render.</p>
     </section>
 
     <section class="card">
@@ -223,11 +225,11 @@ sequenceDiagram
         NWorker->>NWorker: Compute RMS per channel
         NWorker->>NWorker: Compute FFT per channel
         NWorker->>NWorker: Decimate Wave(step=5)
-        NWorker->>NWorker: Build BLOCK_MULTI string
+        NWorker->>NWorker: Build BLK1 binary payload
 
-        NWorker->>Ev: EmitLine(BLOCK_MULTI,...)
-        Ev-->>Dart: String event
-        Dart->>Dart: split(',') + parse doubles
+        NWorker->>Ev: EmitBinary(Uint8List)
+        Ev-->>Dart: Uint8List event
+        Dart->>Dart: ByteData parse header + float blocks
         Dart->>Dart: Build DaqBlockFrame
         Dart-->>UI: AcquisitionSample(fft+wave+rms)
         UI->>UI: setState() + chart render
@@ -238,7 +240,7 @@ sequenceDiagram
     NWorker-->>NMain: thread join
       </pre>
       <p class="small">
-        Giai doan ton CPU nhieu nhat thuong la: FFT tinh toan trong Native va split/parse chuoi lon trong Dart.
+        Giai doan ton CPU nhieu nhat thuong la: FFT tinh toan trong Native va chart render trong Flutter khi tan suat block cao.
       </p>
     </section>
 
@@ -264,14 +266,14 @@ sequenceDiagram
             <td>CPU Native tang, nhat la khi B lon</td>
           </tr>
           <tr>
-            <td>Serialize text</td>
-            <td>ostringstream format rat nhieu so</td>
-            <td>Frame bridge day, line rat dai</td>
+            <td>Pack binary</td>
+            <td>Dong goi header + float payload BLK1</td>
+            <td>Thong luong tot hon text, nhung van tang tai bo nho khi block lon</td>
           </tr>
           <tr>
-            <td>Dart parse</td>
-            <td>split + double.tryParse hang nghin token</td>
-            <td>UI khung/giat luc resize</td>
+            <td>Dart parse binary</td>
+            <td>ByteData getFloat32 + tao list kenh</td>
+            <td>Jank neu event den day va UI ve qua nhieu panel cung luc</td>
           </tr>
           <tr>
             <td>Chart render</td>
@@ -280,6 +282,68 @@ sequenceDiagram
           </tr>
         </tbody>
       </table>
+    </section>
+
+    <section class="card">
+      <h2>6) Cach lay du lieu va hien thi kenh song</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Buoc</th>
+            <th>Thuc hien</th>
+            <th>Du lieu tao ra</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1. Start stream</td>
+            <td>Flutter goi <code>startBridge</code> voi channel, sampleRateHz, samplesPerRead.</td>
+            <td>Native mo task DAQmx + bat dau vong doc block.</td>
+          </tr>
+          <tr>
+            <td>2. Doc block thuc</td>
+            <td>Native goi <code>DAQmxReadAnalogF64(..., GroupByScanNumber)</code>.</td>
+            <td>Mang mau raw interleaved: scan0(ch0..chN), scan1(ch0..chN), ...</td>
+          </tr>
+          <tr>
+            <td>3. Tinh toan</td>
+            <td>Tinh RMS tung kenh, FFT tung kenh, va giam mau song voi <code>kDecimStep=5</code>.</td>
+            <td>RMS[C], FFT[C x B], Wave[C x O].</td>
+          </tr>
+          <tr>
+            <td>4. Dong goi block</td>
+            <td>Native dong goi nhi phan <code>BLK1</code> (magic/version/header + float payload).</td>
+            <td><code>Uint8List</code> gui qua EventChannel.</td>
+          </tr>
+          <tr>
+            <td>5. Parse ben Dart</td>
+            <td><code>_parseBinaryEvent</code> doc header, cat RMS/FFT/Wave/Raw, tao <code>DaqBlockFrame</code>.</td>
+            <td>Block frame day du cho service va UI.</td>
+          </tr>
+          <tr>
+            <td>6. Day len service</td>
+            <td><code>onBridgeBlockFrame</code> tao <code>DaqWaveFrame</code> va day vao stream sample.</td>
+            <td>Sample gom RMS + FFT + Wave.</td>
+          </tr>
+          <tr>
+            <td>7. Ve kenh song</td>
+            <td>UI nhan sample, cap nhat <code>_bridgeWaveSamples[channel]</code>, user chon <code>Kenh song</code>, ve <code>LineChart</code>.</td>
+            <td>Diem ve: <code>FlSpot(i * timeStepMs, value)</code>.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="formula">
+timeStepMs = decimStep / sampleRateHz * 1000
+
+outCount = ceil(samplesRead / decimStep)
+
+x(i) = i * timeStepMs,   y(i) = channelSamples[ch][i]
+      </div>
+      <p class="small">
+        Luu y: file nay dang mo ta duong Binary block hien tai (Windows in-process).
+        Che do text <code>BLOCK_MULTI</code> van co the gap tren mot so duong fallback/log cu.
+      </p>
     </section>
   </main>
 
