@@ -423,6 +423,8 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
   bool _showCombinedPanel = true;
   bool _showFftPanel = true;
   bool _showWavePanel = true;
+  double _topRowHeightRatio = 0.38;
+  bool _isDraggingTopSplitter = false;
   int _uiRefreshFps = 30;
 
   // Latest FFT block received from the NI-DAQmx bridge process.
@@ -4260,7 +4262,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
 
     final double visibleSpanSeconds = max(maxVisibleX - minVisibleX, 1);
     final double xInterval = _combinedXAxisIntervalSeconds(visibleSpanSeconds);
-    final bool isWide = constraints.maxWidth >= 1260;
     final String selectedWindowLabel = _combinedWindowOptions
         .firstWhere(
           (_CombinedWindowOption option) =>
@@ -4853,32 +4854,59 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
       ],
     );
 
-    final Widget combinedOverviewPanel = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        combinedHeaderPanel,
-        const SizedBox(height: 6),
-        Expanded(child: combinedTimePanel),
-      ],
-    );
-
-    final List<Widget> sidePanels = <Widget>[
-      if (_showFftPanel)
-        Expanded(
-          child: _panelShell(
-            title: 'FFT phổ tần',
-            child: _buildFftPanel(compact: true),
+    Widget buildPanelShell({required String title, required Widget child}) {
+      return Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: const Color(0xFFDCE5EF)),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF2A3E53),
+                ),
+              ),
+              const SizedBox(height: 6),
+              Expanded(child: child),
+            ],
           ),
         ),
-      if (_showFftPanel && _showWavePanel) const SizedBox(height: 10),
+      );
+    }
+
+    final List<Widget> topRowPanels = <Widget>[
       if (_showWavePanel)
         Expanded(
-          child: _panelShell(
+          child: buildPanelShell(
             title: 'Dạng sóng',
             child: _buildWavePanel(compact: true),
           ),
         ),
+      if (_showWavePanel && _showFftPanel) const SizedBox(width: 10),
+      if (_showFftPanel)
+        Expanded(
+          child: buildPanelShell(
+            title: 'FFT phổ tần',
+            child: _buildFftPanel(compact: true),
+          ),
+        ),
     ];
+
+    final Widget topRowPanel = Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: topRowPanels,
+    );
+
+    final bool hasTopRow = _showWavePanel || _showFftPanel;
+    final bool hasBottomRow = _showCombinedPanel;
 
     return Padding(
       padding: const EdgeInsets.all(10),
@@ -4889,10 +4917,6 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              if (!isWide) ...<Widget>[
-                combinedHeaderPanel,
-                const SizedBox(height: 4),
-              ],
               Expanded(
                 child: !showAnyPanel
                     ? const Center(
@@ -4905,32 +4929,192 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
                           ),
                         ),
                       )
-                    : isWide
-                    ? Row(
-                        children: <Widget>[
-                          if (_showCombinedPanel)
-                            Expanded(flex: 7, child: combinedOverviewPanel),
-                          if (_showCombinedPanel && sidePanels.isNotEmpty)
-                            const SizedBox(width: 10),
-                          if (sidePanels.isNotEmpty)
-                            Expanded(
-                              flex: 5,
-                              child: Column(children: sidePanels),
+                    : LayoutBuilder(
+                        builder: (BuildContext context, BoxConstraints inner) {
+                          const double splitterHeight = 10;
+                          const double preferredMinTopHeight = 40;
+                          const double preferredMinBottomHeight = 40;
+                          const double minDragSlackPx = 2;
+                          const double minBottomPanelContentHeight = 560;
+                          final bool canSplit = hasTopRow && hasBottomRow;
+                          final double minContentHeight = canSplit
+                              ? (preferredMinTopHeight +
+                                    preferredMinBottomHeight +
+                                    minDragSlackPx +
+                                    splitterHeight)
+                              : 0;
+                          final double contentHeight = max(
+                            inner.maxHeight,
+                            minContentHeight,
+                          );
+                          final double splitAreaHeight = canSplit
+                              ? (contentHeight - splitterHeight)
+                              : contentHeight;
+                          double minTopHeight = splitAreaHeight > 0
+                              ? min(
+                                  preferredMinTopHeight,
+                                  splitAreaHeight * 0.8,
+                                )
+                              : preferredMinTopHeight;
+                          double minBottomHeight = splitAreaHeight > 0
+                              ? min(
+                                  preferredMinBottomHeight,
+                                  splitAreaHeight * 0.8,
+                                )
+                              : preferredMinBottomHeight;
+                          final double maxOccupiedHeight = max(
+                            0.0,
+                            splitAreaHeight - minDragSlackPx,
+                          );
+                          if (minTopHeight + minBottomHeight >
+                              maxOccupiedHeight) {
+                            final double totalMin = max(
+                              1.0,
+                              minTopHeight + minBottomHeight,
+                            );
+                            final double scale = maxOccupiedHeight / totalMin;
+                            minTopHeight *= scale;
+                            minBottomHeight *= scale;
+                          }
+
+                          final double minRatio = splitAreaHeight > 0
+                              ? (minTopHeight / splitAreaHeight).clamp(
+                                  0.03,
+                                  0.85,
+                                )
+                              : 0.03;
+                          final double maxRatio = splitAreaHeight > 0
+                              ? (1 - (minBottomHeight / splitAreaHeight)).clamp(
+                                  0.15,
+                                  0.97,
+                                )
+                              : 0.97;
+                          final double dragMinRatio = minRatio < maxRatio
+                              ? minRatio
+                              : 0.03;
+                          final double dragMaxRatio = minRatio < maxRatio
+                              ? maxRatio
+                              : 0.97;
+                          final bool canDragSplit =
+                              canSplit && dragMinRatio < dragMaxRatio;
+                          final double effectiveRatio = canDragSplit
+                              ? _topRowHeightRatio.clamp(
+                                  dragMinRatio,
+                                  dragMaxRatio,
+                                )
+                              : 0.5;
+                          final double topRowHeight = hasTopRow
+                              ? (canSplit
+                                    ? splitAreaHeight * effectiveRatio
+                                    : contentHeight)
+                              : 0;
+                          final double bottomRowHeight = hasBottomRow
+                              ? (canSplit
+                                    ? splitAreaHeight - topRowHeight
+                                    : contentHeight)
+                              : 0;
+
+                          return SingleChildScrollView(
+                            child: ConstrainedBox(
+                              constraints: BoxConstraints(
+                                minHeight: inner.maxHeight,
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: <Widget>[
+                                  if (hasBottomRow) combinedHeaderPanel,
+                                  if (hasBottomRow && hasTopRow)
+                                    const SizedBox(height: 10),
+                                  if (hasTopRow)
+                                    SizedBox(
+                                      height: topRowHeight,
+                                      child: topRowPanel,
+                                    ),
+                                  if (canSplit)
+                                    MouseRegion(
+                                      cursor: _isDraggingTopSplitter
+                                          ? SystemMouseCursors.grabbing
+                                          : SystemMouseCursors.resizeRow,
+                                      child: Listener(
+                                        behavior: HitTestBehavior.opaque,
+                                        onPointerDown: (_) {
+                                          if (!canDragSplit) {
+                                            return;
+                                          }
+                                          setState(() {
+                                            _isDraggingTopSplitter = true;
+                                          });
+                                        },
+                                        onPointerMove:
+                                            (PointerMoveEvent event) {
+                                              if (!_isDraggingTopSplitter ||
+                                                  !canDragSplit) {
+                                                return;
+                                              }
+                                              setState(() {
+                                                final double nextRatio =
+                                                    _topRowHeightRatio +
+                                                    (event.delta.dy /
+                                                        splitAreaHeight);
+                                                _topRowHeightRatio = nextRatio
+                                                    .clamp(
+                                                      dragMinRatio,
+                                                      dragMaxRatio,
+                                                    )
+                                                    .toDouble();
+                                              });
+                                            },
+                                        onPointerUp: (_) {
+                                          if (!_isDraggingTopSplitter) {
+                                            return;
+                                          }
+                                          setState(() {
+                                            _isDraggingTopSplitter = false;
+                                          });
+                                        },
+                                        onPointerCancel: (_) {
+                                          if (!_isDraggingTopSplitter) {
+                                            return;
+                                          }
+                                          setState(() {
+                                            _isDraggingTopSplitter = false;
+                                          });
+                                        },
+                                        child: Container(
+                                          height: splitterHeight,
+                                          alignment: Alignment.center,
+                                          child: Container(
+                                            width: 76,
+                                            height: 4,
+                                            decoration: BoxDecoration(
+                                              color: _isDraggingTopSplitter
+                                                  ? const Color(0xFF7E98B3)
+                                                  : const Color(0xFFB9C8D8),
+                                              borderRadius:
+                                                  BorderRadius.circular(999),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  if (hasBottomRow)
+                                    SizedBox(
+                                      height: bottomRowHeight,
+                                      child: SingleChildScrollView(
+                                        child: SizedBox(
+                                          height: max(
+                                            bottomRowHeight,
+                                            minBottomPanelContentHeight,
+                                          ),
+                                          child: combinedTimePanel,
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
                             ),
-                        ],
-                      )
-                    : Column(
-                        children: <Widget>[
-                          if (_showCombinedPanel)
-                            Expanded(flex: 4, child: combinedOverviewPanel),
-                          if (_showCombinedPanel && sidePanels.isNotEmpty)
-                            const SizedBox(height: 10),
-                          if (sidePanels.isNotEmpty)
-                            Expanded(
-                              flex: 3,
-                              child: Column(children: sidePanels),
-                            ),
-                        ],
+                          );
+                        },
                       ),
               ),
             ],
@@ -4970,39 +5154,9 @@ class _MineAlertDashboardState extends State<MineAlertDashboard>
             style: const TextStyle(
               fontSize: 10,
               fontWeight: FontWeight.w600,
-              color: Color(0xFF22384D),
+              color: Color(0xFF2A3E53),
             ),
           ),
-        ],
-      ),
-    );
-  }
-
-  Widget _panelShell({required String title, required Widget child}) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(8, 8, 8, 6),
-      decoration: BoxDecoration(
-        color: const Color(0xFFFAFCFF),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0xFFDCE6F1)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: Text(
-              title,
-              style: const TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w700,
-                color: Color(0xFF2A3E53),
-              ),
-            ),
-          ),
-          const SizedBox(height: 6),
-          Expanded(child: child),
         ],
       ),
     );
